@@ -1,6 +1,8 @@
 /**
  * Spreads the Fourier analysis over every CPU core, then joins the pieces.
  */
+import { FFT } from './dsp';
+import { setTuning } from '../render/lightmusic';
 import { finalize } from './finalize';
 import type { Analysis, AnalysisParams, ChunkFeatures, WorkerRequest, WorkerResponse } from './types';
 
@@ -24,6 +26,42 @@ export async function synthesizeDemo(sampleRate: number): Promise<{ left: Float3
   }
 }
 
+/**
+ * The recording's tuning: how far its notes sit from the A4 = 440 Hz grid, in cents. Spectral peaks
+ * (sharpened by parabolic interpolation) from frames across the song each give their offset from the
+ * nearest semitone; the offsets are averaged round a circle (a 100-cent cycle), weighted by strength.
+ */
+export function estimateTuning(mono: Float32Array, sr: number): number {
+  const n = 8192, fft = new FFT(n), re = new Float32Array(n), im = new Float32Array(n);
+  const win = new Float32Array(n);
+  for (let i = 0; i < n; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / n);
+  const frames = Math.min(80, Math.floor(mono.length / n));
+  const binHz = sr / n, lo = Math.ceil(80 / binHz), hi = Math.min(n / 2 - 2, Math.floor(2000 / binHz));
+  const mag = new Float32Array(n / 2);
+  let x = 0, y = 0;
+  for (let k = 0; k < frames; k++) {
+    const start = Math.floor(((k + 0.5) / frames) * (mono.length - n));
+    let energy = 0;
+    for (let i = 0; i < n; i++) { const v = mono[start + i]; re[i] = v * win[i]; energy += v * v; }
+    if (energy / n < 1e-6) continue;
+    fft.run(re, im);
+    let top = 0;
+    for (let b = lo - 1; b <= hi + 1; b++) { mag[b] = Math.hypot(re[b], im[b]); if (mag[b] > top) top = mag[b]; }
+    for (let b = lo; b <= hi; b++) {
+      const m = mag[b];
+      if (m < 0.15 * top || m < mag[b - 1] || m < mag[b + 1]) continue;
+      const a = Math.log(mag[b - 1] + 1e-12), c = Math.log(m + 1e-12), d = Math.log(mag[b + 1] + 1e-12);
+      const shift = (0.5 * (a - d)) / (a - 2 * c + d || 1e-12);
+      const f = (b + Math.max(-0.5, Math.min(0.5, shift))) * binHz;
+      const cents = 1200 * Math.log2(f / 440);
+      const ang = (2 * Math.PI * cents) / 100;
+      x += m * Math.cos(ang); y += m * Math.sin(ang);
+    }
+  }
+  if (Math.hypot(x, y) < 1e-9) return 0;
+  return (Math.atan2(y, x) / (2 * Math.PI)) * 100;
+}
+
 export async function analyzeAudio(buffer: AudioBuffer, onProgress?: (fraction: number) => void): Promise<Analysis> {
   const length = buffer.length, sr = buffer.sampleRate;
   // Mono mix for analysis. The renderer still reads the original stereo samples.
@@ -35,7 +73,9 @@ export async function analyzeAudio(buffer: AudioBuffer, onProgress?: (fraction: 
   }
   const fftSize = sr >= 32000 ? 4096 : 2048;
   const hop = fftSize / 4;
-  const params: AnalysisParams = { sampleRate: sr, fftSize, hop, totalFrames: Math.max(1, Math.ceil(length / hop)) };
+  const tuning = estimateTuning(mono, sr);
+  const params: AnalysisParams = { sampleRate: sr, fftSize, hop, totalFrames: Math.max(1, Math.ceil(length / hop)), refHz: 440 * 2 ** (tuning / 1200) };
+  setTuning(tuning);
 
   const cores = Math.max(1, Math.min(12, (navigator.hardwareConcurrency || 4) - 1));
   // Small jobs keep the progress bar moving and let fast cores take more of them.
@@ -70,6 +110,7 @@ export async function analyzeAudio(buffer: AudioBuffer, onProgress?: (fraction: 
     workers.forEach((w) => w.terminate());
   }
   const result = finalize(chunks, params, buffer.duration);
+  result.tuning = tuning;
   // Stereo balance: the share of each frame's energy in the right channel against the left.
   if (buffer.numberOfChannels >= 2) {
     const L = buffer.getChannelData(0), R = buffer.getChannelData(1);

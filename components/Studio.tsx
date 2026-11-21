@@ -140,7 +140,7 @@ export default function Studio() {
     renderer.current = r;
     const s = songRef.current;
     if (s) r.setSong(s.analysis);
-    // For checking one design on its own: ?design=plate (ribbons, rings, plate, ripples, membrane).
+    // For checking one design on its own: ?design=plate (ribbons, rings, plate, ripples, membrane, faraday, strings).
     // Honour the system's "reduce motion" setting on screen (exported videos always have full motion).
     const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
     r.reducedMotion = calm.matches;
@@ -835,10 +835,29 @@ export default function Studio() {
           Ribbons: the middle is now and the edges are four seconds ago; each ribbon is a pitch range, bass at the
           bottom. Rings: one leaves the centre with each attack in the music (faint ones at the beat through sustained sound), keeping the colour and notes of its moment, and fades as it spreads, as a real wave does.
         </p>
+        <h4>Faraday waves</h4>
+        <p>
+          A dish of liquid shaken at a frequency grows standing waves on its surface. Their wavelength follows the
+          physics of water waves (gravity and surface tension), so lower music makes longer waves. The number of
+          notes sounding sets the symmetry, as two-frequency experiments show: one note squares, two hexagons,
+          three an eight-fold pattern, four or more a twelve-fold quasi-crystal. Crests catch the light.
+        </p>
+        <h4>Strings</h4>
+        <p>
+          One string for each note sounding, lowest on the left, each as long as a string tuned to that note would
+          be. A plucked string vibrates as a sum of harmonics set by where it is plucked: near the end for a bright
+          sound, near the middle for a mellow one. That point comes from this sound&apos;s brightness.
+        </p>
+        <h4>Where and how large</h4>
+        <p>
+          Louder parts are drawn larger, as a nearer source would look. The picture leans toward where the sound sits
+          between the speakers and rises a little with high music, all gliding over a few seconds.
+        </p>
         <h4>Colour and sky</h4>
         <p>
           A note&apos;s colour is its frequency raised by about forty octaves into visible light: C green, D blue,
-          E violet, G red, A orange. Louder is more vivid, lower music deeper and higher music lighter. A bright
+          E violet, G red, A orange. The frequency is the one this recording actually plays: its tuning is measured
+          (A at 432 Hz, 442 Hz, a tape running fast), so each recording&apos;s notes give their own light. Louder is more vivid, lower music deeper and higher music lighter. A bright
           timbre carries strong overtones (the fifth and the third above), so its notes take some of their light;
           a pure tone keeps its own. Noisy sound is less vivid. The room behind follows the harmony. Stars are
           coloured by temperature: brighter-sounding songs have hotter, bluer stars, and in clearly pitched music

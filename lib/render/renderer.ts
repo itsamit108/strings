@@ -8,7 +8,7 @@ import type { Analysis } from '../analysis/types';
 import { BAND_COUNT, BAND_HIGH_HZ, BAND_LOW_HZ } from '../analysis/types';
 import { FeatureSampler, fifthsAngle } from '../analysis/finalize';
 import { oklch } from './color';
-import { BLUE_HUE, chordTones, mixHue, NOTE_HUES, notesHue, valence, vivid, YELLOW_HUE } from './lightmusic';
+import { BLUE_HUE, chordTones, mixHue, NOTE_HUES, notesHue, setTuning, valence, vivid, YELLOW_HUE } from './lightmusic';
 import { designsAt, planSections, type Design, type Section } from '../analysis/sections';
 import * as S from './shaders';
 
@@ -105,7 +105,7 @@ function hash01(n: number): number {
 
 export class PlateRenderer {
   private gl!: WebGL2RenderingContext;
-  private prog!: Record<'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'fade' | 'present', Program>;
+  private prog!: Record<'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'faraday' | 'strings' | 'fade' | 'present', Program>;
   private besselTex!: WebGLTexture;
   private captionTex!: WebGLTexture;
   private labelTex!: WebGLTexture;
@@ -225,6 +225,12 @@ export class PlateRenderer {
   private turnDir = 1;
   /** seconds a line's light lingers: this recording's own decay */
   private trail = TRAIL;
+  /** where the design sits and how large it is (they glide): offset in pixels, scale */
+  private placeX = Number.NaN;
+  private placeY = 0;
+  private placeS = 1;
+  private faradayPhase = 0;
+  private stringPhase = new Float32Array(6);
   /** when each ring leaves the centre and how strong it is: (seconds, strength) pairs, in time order */
   private ringEvents: Float32Array | null = null;
   /** the sky's current drift velocity and turning speed (they glide, never jump) */
@@ -293,7 +299,7 @@ export class PlateRenderer {
     };
     this.prog = {
       ribbons: mk(S.RIBBONS_FS), rings: mk(S.RINGS_FS), plate: mk(S.PLATE_FS), ripples: mk(S.RIPPLES_FS),
-      membrane: mk(S.MEMBRANE_FS), fade: mk(S.FADE_FS), present: mk(S.PRESENT_FS),
+      membrane: mk(S.MEMBRANE_FS), faraday: mk(S.FARADAY_FS), strings: mk(S.STRINGS_FS), fade: mk(S.FADE_FS), present: mk(S.PRESENT_FS),
     };
     this.vao = gl.createVertexArray()!;
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -354,6 +360,9 @@ export class PlateRenderer {
     this.turnDir = 1;
     this.flowVel = [Number.NaN, Number.NaN];
     this.rotVel = Number.NaN;
+    this.placeX = Number.NaN;
+    this.faradayPhase = 0;
+    this.stringPhase.fill(0);
     this.register = 300;
     this.tonal = 0.5;
     this.ripplePhase.fill(0);
@@ -403,6 +412,8 @@ export class PlateRenderer {
 
   setSong(analysis: Analysis | null) {
     this.analysis = analysis;
+    // Every note's light follows the recording's own tuning.
+    setTuning(analysis?.tuning ?? 0);
     this.sampler = analysis ? new FeatureSampler(analysis) : null;
     if (analysis) {
       // The waves travel faster through loud passages and almost rest in quiet ones.
@@ -820,7 +831,19 @@ export class PlateRenderer {
     // Low sound has long waves: lines are thicker in a low register and finer in a high one.
     const regWidth = Math.min(1.45, Math.max(0.75, Math.sqrt(330 / register)));
     const voiceWide = (1 + 0.35 * this.voiceNow) * regWidth;
-    const ctx: DrawCtx = { W, H, unit, time, dt, ease, level: level * (1 + 0.35 * this.bassHit) * (1 + 0.3 * this.voiceNow + 0.35 * this.voiceIn), tonic, minor, mood, now, cx: W / 2, cy: H * (0.5 + this.centerOffset), order, pulse, voiceWide, noteHz };
+    // Where the design sits and how large it is follow the sound, gliding over a few seconds:
+    //  - size from loudness: a louder source is a nearer one, and looks larger (0.84 to 1.06);
+    //  - sideways toward where the sound sits between the speakers (stereo balance);
+    //  - up for high music and down for low (pitch-height correspondence).
+    const still = this.reducedMotion || this.compact || !a;
+    const tS = still ? 1 : 0.84 + 0.22 * Math.min(1, this.energy);
+    const tX = still ? 0 : 0.05 * W * Math.max(-1, Math.min(1, this.panNow * 1.5));
+    const tY = still ? 0 : 0.035 * H * Math.max(-1, Math.min(1, Math.log2(register / 330) / 2));
+    if (Number.isNaN(this.placeX)) { this.placeX = tX; this.placeY = tY; this.placeS = tS; }
+    this.placeX += (tX - this.placeX) * ease(3);
+    this.placeY += (tY - this.placeY) * ease(3);
+    this.placeS += (tS - this.placeS) * ease(3);
+    const ctx: DrawCtx = { W, H, unit, time, dt, ease, level: level * (1 + 0.35 * this.bassHit) * (1 + 0.3 * this.voiceNow + 0.35 * this.voiceIn), tonic, minor, mood, now, cx: W / 2 + this.placeX, cy: H * (0.5 + this.centerOffset) + this.placeY, order, pulse: pulse * this.placeS, voiceWide, noteHz };
 
     const plan = !a ? { shown: [{ design: 'ribbons' as Design, weight: 1 }], blend: 0, progress: -1 }
       : this.force ? { shown: [{ design: this.force, weight: 1 }], blend: 0, progress: -1 }
@@ -1056,6 +1079,82 @@ export class PlateRenderer {
       gl.uniform1f(p.u.uJump, Math.min(1, Math.max(this.kick * 1.5, this.bassHit)));
       gl.uniform1f(p.u.uTime, c.time);
       gl.uniform1f(p.u.uIntensity, lvl * 1.6);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    } else if (design === 'faraday') {
+      // The notes clearly sounding drive the surface: 1 → squares, 2 → hexagons, 3 → 8-fold, 4 → 12-fold.
+      const top = this.plateW[c.order[0]];
+      const notes = c.order.slice(0, 4).filter((pc, k) => k === 0 || this.plateW[pc] >= 0.3 * top);
+      const dirs = [2, 3, 4, 6][notes.length - 1];
+      const R = 0.43 * unit * c.pulse;
+      // Dispersion of waves on water: ω² = g·k + (σ/ρ)·k³, the response at half the drive frequency.
+      // Drive: each note brought three octaves down (into the 10–150 Hz a Faraday dish is driven at).
+      // The dish is 8 cm across; its picture is 2R pixels.
+      const pxPerM = (2 * R) / 0.08;
+      const kOf = (hz: number) => {
+        const w = Math.PI * Math.min(150, Math.max(10, hz / 8)); // ω = 2π · (f/2)
+        let k = Math.cbrt((w * w) / 7.2e-5);
+        for (let it = 0; it < 8; it++) {
+          const f = 9.81 * k + 7.2e-5 * k * k * k - w * w;
+          k -= f / (9.81 + 3 * 7.2e-5 * k * k);
+        }
+        return k / pxPerM; // radians per pixel
+      };
+      const k = new Float32Array(6);
+      // A pattern locks to one wavelength (the strongest note's); the other notes set how many directions.
+      k.fill(kOf(c.noteHz[notes[0]]));
+      // The surface answers at half the drive frequency; shown 64 times slower.
+      this.faradayPhase += Math.PI * (Math.min(150, Math.max(10, c.noteHz[notes[0]] / 8)) / 64) * c.dt;
+      const p = this.prog.faraday;
+      this.use(p);
+      const ca = note(notes[0], 0.74), cb = note(notes[Math.min(1, notes.length - 1)], 0.7);
+      gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
+      gl.uniform1f(p.u.uRadius, R);
+      gl.uniform1i(p.u.uDirs, dirs);
+      gl.uniform1fv(p.u.uK, k);
+      gl.uniform1f(p.u.uTurn, this.membraneTurn[1]);
+      gl.uniform1f(p.u.uBreath, Math.cos(this.faradayPhase));
+      gl.uniform3f(p.u.uColA, ca[0], ca[1], ca[2]);
+      gl.uniform3f(p.u.uColB, cb[0], cb[1], cb[2]);
+      gl.uniform1f(p.u.uWidthPx, 1.1 * c.voiceWide);
+      gl.uniform1f(p.u.uIntensity, lvl * 1.5);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    } else if (design === 'strings') {
+      // One string for each note sounding (at least a fifth as strong as the strongest), lowest on the left.
+      const top = this.plateW[c.order[0]];
+      const notes = c.order.slice(0, 6).filter((pc, k) => k === 0 || this.plateW[pc] >= 0.2 * top)
+        .sort((x, y) => c.noteHz[x] - c.noteHz[y]);
+      const n = notes.length;
+      const fLow = c.noteHz[notes[0]];
+      const Lmax = 0.42 * Math.min(H, 1.5 * W) * c.pulse;
+      const gap = Math.min(0.16 * unit, (0.75 * W) / Math.max(1, n)) * c.pulse;
+      // Where it is plucked, from the timbre: bright sound → near the end (β 0.1), mellow → the middle (β 0.5).
+      const beta = 0.5 - 0.4 * Math.min(1, Math.max(0, 0.7 * this.brightness + 0.3 * this.songBright));
+      const harm = new Float32Array(8);
+      let hs = 0;
+      for (let m = 1; m <= 8; m++) { harm[m - 1] = Math.sin(m * Math.PI * beta) / (m * m); hs += Math.abs(harm[m - 1]); }
+      for (let m = 0; m < 8; m++) harm[m] /= hs;
+      const X = new Float32Array(6), Lh = new Float32Array(6), amp = new Float32Array(6), cols = new Float32Array(18);
+      for (let i = 0; i < n; i++) {
+        const pc = notes[i], f = c.noteHz[pc];
+        X[i] = c.cx + (i - (n - 1) / 2) * gap;
+        Lh[i] = Math.max(0.35, fLow / f) * Lmax;
+        amp[i] = unit * (0.01 + 0.05 * this.plateW[pc] / Math.max(1e-6, top)) * (1 + 0.8 * this.kick + 0.5 * this.bassHit) * c.pulse;
+        // Shown 128 times slower than it sounds.
+        this.stringPhase[i] += 2 * Math.PI * (f / 128) * c.dt;
+        cols.set(note(pc, 0.74), i * 3);
+      }
+      const p = this.prog.strings;
+      this.use(p);
+      gl.uniform1i(p.u.uCount, n);
+      gl.uniform1fv(p.u.uX, X);
+      gl.uniform1fv(p.u.uLen, Lh);
+      gl.uniform1fv(p.u.uAmp, amp);
+      gl.uniform1fv(p.u.uPhase, this.stringPhase);
+      gl.uniform3fv(p.u.uCol, cols);
+      gl.uniform1fv(p.u.uHarm, harm);
+      gl.uniform1f(p.u.uCy, c.cy);
+      gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.4 * c.voiceWide);
+      gl.uniform1f(p.u.uIntensity, lvl * 1.3);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     } else if (design === 'ripples') {
       // One source for each note clearly sounding (at least a quarter as strong as the strongest), 2 to 4.

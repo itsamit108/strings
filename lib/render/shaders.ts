@@ -485,3 +485,100 @@ void main() {
   vec3 col = mix(uColIn, uColOut, k);
   o = vec4(col * line * inside * step(0.04, R) * (0.55 + 0.45 * k) * uIntensity * reveal(), 1.0);
 }`;
+
+const REVEAL = /* glsl */ `
+uniform vec4 uReveal;
+uniform float uSide;
+float reveal() {
+  if (uSide == 0.0) return 1.0;
+  float m = smoothstep(uReveal.z - uReveal.w, uReveal.z + uReveal.w, length(gl_FragCoord.xy - uReveal.xy));
+  return uSide > 0.0 ? cos(m * 1.5707963) : sin(m * 1.5707963);
+}`;
+
+/**
+ * FARADAY WAVES: a dish of liquid shaken up and down at a frequency grows standing waves on its surface
+ * (Faraday 1831), answering at half the drive frequency. Their wavelength follows the dispersion of
+ * capillary-gravity waves, ω² = g·k + (σ/ρ)·k³, so a lower drive gives longer waves. One drive frequency
+ * gives squares; two give hexagons; more give 8- and 12-fold quasi-patterns (Edwards & Fauve 1994).
+ * Here the drive is the music: the waves' directions come from the notes sounding, each with the
+ * wavenumber its own frequency gives. Lines are the surface's nodal lines; crests catch the light.
+ */
+export const FARADAY_FS = /* glsl */ `#version 300 es
+precision highp float;
+uniform vec2 uCenterPx;
+uniform float uRadius;
+uniform int uDirs;          // number of wave directions (2 squares, 3 hexagons, 4 eight-fold, 6 twelve-fold)
+uniform float uK[6];        // wavenumber of each direction, radians per pixel
+uniform float uTurn;        // orientation of the pattern
+uniform float uBreath;      // cos(Ω t): the surface rising and falling
+uniform vec3 uColA;
+uniform vec3 uColB;
+uniform float uWidthPx;
+uniform float uIntensity;
+out vec4 o;
+${REVEAL}
+void main() {
+  vec2 p = gl_FragCoord.xy - uCenterPx;
+  float r = length(p) / uRadius;
+  if (r > 1.08) { o = vec4(0.0); return; }
+  float h = 0.0;
+  for (int j = 0; j < 6; j++) {
+    if (j >= uDirs) break;
+    float a = uTurn + 3.14159265 * float(j) / float(uDirs);
+    h += cos(uK[j] * dot(p, vec2(cos(a), sin(a))));
+  }
+  h /= float(uDirs);
+  float g = max(fwidth(h), 1e-5);
+  float nodal = exp(-pow(h / (g * uWidthPx), 2.0)) * 0.45;          // still lines: where the surface never moves
+  float hb = h * uBreath;
+  float crest = pow(max(hb, 0.0), 5.0) * 0.9;                        // light gathered by the rising crests
+  float dish = 1.0 - smoothstep(0.94, 1.0, r);
+  float rim = exp(-pow((r - 1.0) * uRadius / (1.5 * uWidthPx), 2.0)) * 0.25;
+  // Crests in the strongest note's light, the still lines in the next note's.
+  o = vec4((uColA * crest + uColB * nodal) * dish * uIntensity * reveal() + uColB * rim * uIntensity * reveal(), 1.0);
+}`;
+
+/**
+ * STRINGS: one string for each note sounding, lowest on the left, each as long as a real string tuned to
+ * that note would be beside the others (length ∝ 1 / frequency). A plucked string vibrates as a sum of its
+ * harmonics, the n-th with amplitude ∝ sin(nπβ)/n², β being where it was plucked: near the end gives a
+ * bright sound with strong upper harmonics, near the middle a mellow one. β comes from this sound's
+ * brightness, so the strings move with the timbre heard. Each harmonic swings at n times the note's
+ * frequency, slowed so the eye can follow; the light's trail draws the vibrating envelope.
+ */
+export const STRINGS_FS = /* glsl */ `#version 300 es
+precision highp float;
+uniform int uCount;
+uniform float uX[6];        // each string's position, pixels
+uniform float uLen[6];      // half its length, pixels
+uniform float uAmp[6];      // how far it swings, pixels
+uniform float uPhase[6];    // its fundamental's phase
+uniform vec3 uCol[6];
+uniform float uHarm[8];     // the harmonics' amplitudes (from where it was plucked)
+uniform float uCy;
+uniform float uWidthPx;
+uniform float uIntensity;
+out vec4 o;
+${REVEAL}
+void main() {
+  vec2 px = gl_FragCoord.xy;
+  vec3 acc = vec3(0.0);
+  for (int i = 0; i < 6; i++) {
+    if (i >= uCount) break;
+    float u = (px.y - uCy) / uLen[i] * 0.5 + 0.5;     // 0..1 along the string
+    if (u < -0.02 || u > 1.02) continue;
+    float uc = clamp(u, 0.0, 1.0);
+    float d = 0.0;
+    for (int n = 0; n < 8; n++) {
+      float fn = float(n + 1);
+      d += uHarm[n] * sin(fn * 3.14159265 * uc) * cos(fn * uPhase[i]);
+    }
+    float dist = abs(px.x - (uX[i] + d * uAmp[i]));
+    float inside = smoothstep(-0.02, 0.0, u) * (1.0 - smoothstep(1.0, 1.02, u));
+    float line = (exp(-dist * dist / (uWidthPx * uWidthPx)) + 0.05 / (1.0 + dist * dist / (30.0 * uWidthPx * uWidthPx)) * smoothstep(0.0, 0.08, uc) * (1.0 - smoothstep(0.92, 1.0, uc))) * inside;
+    float near = exp(-pow((px.x - uX[i]) / (2.5 * uWidthPx), 2.0));   // the pegs at each end
+    float ends = near * (exp(-pow(u * uLen[i] * 2.0 / (2.5 * uWidthPx), 2.0)) + exp(-pow((u - 1.0) * uLen[i] * 2.0 / (2.5 * uWidthPx), 2.0)));
+    acc += uCol[i] * (line + 0.6 * ends);
+  }
+  o = vec4(acc * uIntensity * reveal(), 1.0);
+}`;

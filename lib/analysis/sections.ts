@@ -14,18 +14,22 @@
  *  - Rings: many onsets (hits); a ring leaves the centre on every half beat.
  *  - Membrane: weight in the voice range (about 300 Hz–2.5 kHz, pitch ranges 4–6), as modes of a round drum skin.
  *  - Ribbons: energy across the whole spectrum at once.
+ *  - Faraday waves: steady chords (several notes held together), as the standing waves on a vibrated liquid.
+ *  - Strings: clear notes with attacks (plucked or struck), as the strings that sound them.
  */
 import type { Analysis } from './types';
 import { BAND_COUNT } from './types';
 
-export type Design = 'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane';
-export const DESIGNS: Design[] = ['ribbons', 'rings', 'plate', 'ripples', 'membrane'];
+export type Design = 'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'faraday' | 'strings';
+export const DESIGNS: Design[] = ['ribbons', 'rings', 'plate', 'ripples', 'membrane', 'faraday', 'strings'];
 export const DESIGN_NAMES: Record<Design, string> = {
   ribbons: 'Ribbons',
   rings: 'Rings',
   plate: 'Plate',
   ripples: 'Ripple tank',
   membrane: 'Membrane',
+  faraday: 'Faraday waves',
+  strings: 'Strings',
 };
 
 export interface Section {
@@ -218,6 +222,8 @@ function raw(s: SectionStats): Record<Design, number> {
     rings: s.onset * (0.5 + s.loud),
     membrane: s.voice * (0.5 + s.loud) * (1 - s.spread * 0.5),
     ribbons: s.spread * (0.5 + s.loud) * (0.7 + s.high),
+    faraday: s.steady * s.pair * (0.5 + s.spread) * calm,
+    strings: s.top1 * Math.min(1, 0.2 + s.onset / 0.25) * (0.6 + s.high),
   };
 }
 

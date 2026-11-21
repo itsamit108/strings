@@ -16,6 +16,8 @@ export interface ChunkFeatures {
 }
 
 export interface AnalysisParams {
+  /** the recording's own A4, Hz (440 unless it is tuned otherwise) */
+  refHz?: number;
   sampleRate: number;
   fftSize: number;
   hop: number;
@@ -57,6 +59,8 @@ export interface Analysis extends AnalysisParams {
   arcHue: Float32Array;
   /** where the sound sits between the speakers in each frame: -1 left .. 0 centre .. +1 right */
   pan?: Float32Array;
+  /** how far the recording's tuning sits from A4 = 440 Hz, in cents (-50..50) */
+  tuning?: number;
 }
 
 export type WorkerRequest =

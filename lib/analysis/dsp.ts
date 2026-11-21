@@ -4,7 +4,7 @@
  */
 import { BAND_COUNT, BAND_HIGH_HZ, BAND_LOW_HZ, type AnalysisParams, type ChunkFeatures } from './types';
 
-class FFT {
+export class FFT {
   private rev: Uint32Array;
   private cos: Float32Array;
   private sin: Float32Array;
@@ -63,7 +63,8 @@ interface Tables {
 let tables: Tables | null = null;
 
 function getTables(p: AnalysisParams): Tables {
-  const key = `${p.sampleRate}:${p.fftSize}`;
+  const ref = p.refHz ?? 440;
+  const key = `${p.sampleRate}:${p.fftSize}:${ref}`;
   if (tables && tables.key === key) return tables;
   const n = p.fftSize, bins = n / 2;
   const window = new Float32Array(n);
@@ -74,7 +75,7 @@ function getTables(p: AnalysisParams): Tables {
   for (let b = 1; b < bins; b++) {
     const f = b * binHz;
     if (f < 160 || f > 4200) continue;
-    const midi = Math.round(69 + 12 * Math.log2(f / 440));
+    const midi = Math.round(69 + 12 * Math.log2(f / ref)); // the recording's own tuning
     pitchClass[b] = ((midi % 12) + 12) % 12;
   }
 

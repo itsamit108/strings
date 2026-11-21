@@ -62,8 +62,20 @@ export function frequencyHue(hz: number): number {
   return (hueViolet + t * span) % 1;
 }
 
-/** Hue of each pitch class (C = 0), from physics. */
+/**
+ * Hue of each pitch class (C = 0), from physics: the light of the note's actual frequency in this
+ * recording. A recording tuned sharp or flat of A4 = 440 Hz (A = 432, 442, a tape running fast...)
+ * sounds at different frequencies, so its notes give slightly different light: see setTuning.
+ */
 export const NOTE_HUES = Float32Array.from({ length: 12 }, (_, pc) => frequencyHue(C4 * 2 ** (pc / 12)));
+let tuningCents = 0;
+/** Sets the recording's tuning (cents from A4 = 440 Hz); every note's light follows its real frequency. */
+export function setTuning(cents: number) {
+  const c = Number.isFinite(cents) ? Math.max(-50, Math.min(50, cents)) : 0;
+  if (c === tuningCents) return;
+  tuningCents = c;
+  for (let pc = 0; pc < 12; pc++) NOTE_HUES[pc] = frequencyHue(C4 * 2 ** ((pc + c / 100) / 12));
+}
 
 /** Hue of the notes sounding (weights per pitch class), and how clearly one colour dominates (0..1). */
 export function notesHue(weights: ArrayLike<number>): { hue: number; clarity: number } {

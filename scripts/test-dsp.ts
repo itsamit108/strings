@@ -55,3 +55,14 @@ import('../lib/analysis/sections').then(({ planSections, DESIGN_NAMES }) => {
   const d = decays.length >= 4 ? decays[decays.length >> 1] : 0.3;
   console.log('decay events', decays.length, 'median', d.toFixed(2), 's -> trail', Math.min(0.2, Math.max(0.04, 0.035 + 0.12 * d)).toFixed(3), 's');
 }
+
+// Tuning: pure tones (with two harmonics) at known frequencies must read back their offset from A4 = 440 Hz.
+import('../lib/analysis/analyze').then(({ estimateTuning }) => {
+  for (const hz of [440, 432, 445, 261.6256 * 2 ** (-0.2 / 12)]) {
+    const sr = 44100, x = new Float32Array(sr * 6);
+    for (let i = 0; i < x.length; i++) { const t = i / sr; x[i] = 0.5 * Math.sin(2 * Math.PI * hz * t) + 0.2 * Math.sin(4 * Math.PI * hz * t) + 0.1 * Math.sin(6 * Math.PI * hz * t); }
+    const want = ((1200 * Math.log2(hz / 440)) % 100 + 150) % 100 - 50;
+    console.log(`tuning ${hz.toFixed(2)} Hz -> ${estimateTuning(x, sr).toFixed(1)} cents (expected ${want.toFixed(1)})`);
+  }
+  console.log('demo tuning', estimateTuning(mono, 44100).toFixed(1), 'cents');
+});
