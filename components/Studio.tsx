@@ -140,6 +140,11 @@ export default function Studio() {
     const s = songRef.current;
     if (s) r.setSong(s.analysis);
     // For checking one design on its own: ?design=plate (ribbons, rings, plate, figure, ripples, membrane).
+    // Honour the system's "reduce motion" setting on screen (exported videos always have full motion).
+    const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
+    r.reducedMotion = calm.matches;
+    const onCalm = () => { r.reducedMotion = calm.matches; };
+    calm.addEventListener('change', onCalm);
     const forced = new URLSearchParams(location.search).get('design') as Design | null;
     if (forced && DESIGNS.includes(forced)) r.force = forced;
 
@@ -208,6 +213,7 @@ export default function Studio() {
     raf = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(raf);
+      calm.removeEventListener('change', onCalm);
       ro.disconnect();
       r.dispose();
       renderer.current = null;
@@ -440,7 +446,8 @@ export default function Studio() {
       setExp({ stage: 'running', live: true });
       // Record at the chosen size and shape, at full resolution, from the song's own starting state.
       holdSize.current = true;
-      const keep = { offset: r.centerOffset, compact: r.compact };
+      const keep = { offset: r.centerOffset, compact: r.compact, calm: r.reducedMotion };
+      r.reducedMotion = false;
       r.governorPaused = true;
       r.centerOffset = 0;
       r.compact = false;
@@ -456,6 +463,7 @@ export default function Studio() {
         r.governorPaused = false;
         r.centerOffset = keep.offset;
         r.compact = keep.compact;
+        r.reducedMotion = keep.calm;
         canvas.classList.remove('exporting');
         fit.current();
       }
@@ -606,7 +614,7 @@ export default function Studio() {
               </div>
               <dl>
                 {/* Shown only when measured clearly: silence, noise or a lone tone have no key or steady beat. */}
-                <div><dt>Key</dt><dd>{a.key.confidence >= 0.6 ? a.key.name : 'no clear key'}</dd></div>
+                <div><dt>Key</dt><dd>{a.key.confidence >= 0.6 && (a.key.notes ?? 12) >= 3 ? a.key.name : 'no clear key'}</dd></div>
                 <div><dt>Tempo</dt><dd>{a.tempoStrength >= 0.2 ? `${Math.round(a.bpm)} BPM` : 'no steady beat'}</dd></div>
                 <div><dt>Now</dt><dd ref={designRef} className="design">{DESIGN_NAMES[renderer.current?.current ?? 'ribbons']}</dd></div>
                 <div><dt>Figure</dt><dd>{a.fingerprint.slice(0, 4)} {a.fingerprint.slice(4, 8)}</dd></div>

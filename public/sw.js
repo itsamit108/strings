@@ -27,10 +27,18 @@ self.addEventListener('message', (event) => {
   }
 });
 
+// Every release adds new fingerprinted files; keep only the newest so old releases do not pile up.
+const MAX_ENTRIES = 160;
+const trim = (c) =>
+  c.keys().then((keys) => {
+    const extra = keys.filter((k) => !SHELL.includes(new URL(k.url).pathname)).slice(0, Math.max(0, keys.length - MAX_ENTRIES));
+    return Promise.all(extra.map((k) => c.delete(k)));
+  });
+
 const store = (request, response) => {
   if (response && response.ok && response.type === 'basic') {
     const copy = response.clone();
-    caches.open(CACHE).then((c) => c.put(request, copy));
+    caches.open(CACHE).then((c) => c.put(request, copy).then(() => trim(c)));
   }
   return response;
 };

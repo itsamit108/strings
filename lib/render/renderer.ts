@@ -5,7 +5,7 @@
  * light read back blurred.
  */
 import type { Analysis } from '../analysis/types';
-import { BAND_COUNT } from '../analysis/types';
+import { BAND_COUNT, BAND_HIGH_HZ, BAND_LOW_HZ } from '../analysis/types';
 import { FeatureSampler, fifthsAngle } from '../analysis/finalize';
 import { oklch } from './color';
 import { BLUE_HUE, chordTones, mixHue, NOTE_HUES, notesHue, valence, vivid, YELLOW_HUE } from './lightmusic';
@@ -20,8 +20,15 @@ const TRAIL = 0.07; // seconds a line's light lingers
 const SHAPE_W = 128;
 const SHAPE_H = 48;
 /** Waves across the screen for each ribbon: long for bass, short for treble. */
-const RIBBON_CYCLES = [0.8, 1.15, 1.6, 2.2];
-const RIBBON_SPEED = [0.55, 0.75, 1.0, 1.3];
+/**
+ * Ribbon k spans pitch ranges 2k and 2k+1. We hear pitch on a log scale, so its waves follow the ribbon's
+ * pitch in octaves above 20 Hz (the bottom of hearing): about 2, 4, 6 and 8 octaves. Wave count and speed
+ * are in proportion to that.
+ */
+const RIBBON_OCTAVES = Array.from({ length: 4 }, (_, k) =>
+  Math.log2((BAND_LOW_HZ * Math.pow(BAND_HIGH_HZ / BAND_LOW_HZ, (2 * k + 1) / BAND_COUNT)) / 20));
+const RIBBON_CYCLES = RIBBON_OCTAVES.map((o) => 0.4 * o);
+const RIBBON_SPEED = RIBBON_OCTAVES.map((o) => 0.27 * o);
 
 /** First zero of J_n, n = 0..8: the rim of a drum skin stays still. */
 const BESSEL_ZEROS = [2.4048, 3.8317, 5.1356, 6.3802, 7.5883, 8.7715, 9.9361, 11.0864, 12.2251];
@@ -129,6 +136,8 @@ export class PlateRenderer {
   centerOffset = 0;
   /** keep the ribbons together in a narrow band (used behind the first screen's text) */
   compact = false;
+  /** the viewer asked their system for less motion: no swelling, no sky waves, slower drift */
+  reducedMotion = false;
   /** stop adapting the resolution (used during export) */
   governorPaused = false;
 
@@ -625,12 +634,12 @@ export class PlateRenderer {
 
     // ---- the sky moves with the music --------------------------------------
     const tempo = a ? a.bpm / 120 : 0.5;
-    const flowSpeed = (0.006 + 0.022 * this.energy) * tempo;
+    const flowSpeed = (0.006 + 0.022 * this.energy) * tempo * (this.reducedMotion ? 0.3 : 1);
     this.skyFlow[0] += flowSpeed * dt * (0.8 + 0.4 * Math.sin(0.05 * time));
     this.skyFlow[1] += flowSpeed * dt * 0.35;
-    this.skyRot += 0.0045 * tempo * (0.6 + 0.8 * this.energy) * dt;
+    this.skyRot += 0.0045 * tempo * (0.6 + 0.8 * this.energy) * dt * (this.reducedMotion ? 0.3 : 1);
     // A clear onset sends a wave out from the centre (at most one per quarter second).
-    if (a && playing && (onset > 0.35 || this.bassHit > 0.5) && time - this.lastHit > 0.25) {
+    if (a && playing && !this.reducedMotion && (onset > 0.35 || this.bassHit > 0.5) && time - this.lastHit > 0.25) {
       this.hits[this.hitNext * 2] = time;
       this.hits[this.hitNext * 2 + 1] = Math.min(1, Math.max(onset * (0.4 + loud), this.bassHit));
       this.hitNext = (this.hitNext + 1) % 6;
@@ -665,7 +674,7 @@ export class PlateRenderer {
       this.plateW[pc] += (w - this.plateW[pc]) * ease(0.35);
     }
     const order = Array.from({ length: 12 }, (_, i) => i).sort((x, y) => this.plateW[y] - this.plateW[x]);
-    const pulse = 1 + 0.07 * this.bassNow + 0.06 * this.bassHit;
+    const pulse = this.reducedMotion ? 1 : 1 + 0.07 * this.bassNow + 0.06 * this.bassHit;
     const voiceWide = 1 + 0.35 * this.voiceNow;
     const ctx: DrawCtx = { W, H, unit, time, dt, ease, level: level * (1 + 0.35 * this.bassHit) * (1 + 0.3 * this.voiceNow + 0.35 * this.voiceIn), tonic, minor, mood, now, cx: W / 2, cy: H * (0.5 + this.centerOffset), order, pulse, voiceWide };
 
@@ -739,7 +748,7 @@ export class PlateRenderer {
     gl.uniform1i(pr.u.uCaption, 3);
     gl.uniform1f(pr.u.uCaptionAlpha, capA);
     this.captionAlpha = capA;
-    gl.uniform1f(pr.u.uCaptionLift, (1 - smooth01(0.3, 2.2, time)) * 0.015);
+    gl.uniform1f(pr.u.uCaptionLift, this.reducedMotion ? 0 : (1 - smooth01(0.3, 2.2, time)) * 0.015);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
@@ -826,7 +835,12 @@ export class PlateRenderer {
       const rel1 = (n1 - c.tonic + 12) % 12, rel2 = (n2 - c.tonic + 12) % 12;
       const lo = rel1 <= rel2 ? n1 : n2, hi = rel1 <= rel2 ? n2 : n1;
       const interval = (hi - lo + 12) % 12;
-      const fLo = 261.6256 * Math.pow(2, lo / 12);   // in the octave from middle C
+      // The notes' octave: where the spectrum's energy sits now (centre of the pitch-range levels).
+      let wsum = 0, ksum = 0;
+      for (let k = 0; k < BAND_COUNT; k++) { wsum += this.bandsNow[k]; ksum += this.bandsNow[k] * k; }
+      const register = BAND_LOW_HZ * Math.pow(BAND_HIGH_HZ / BAND_LOW_HZ, ((wsum > 1e-6 ? ksum / wsum : 3.5) + 0.5) / BAND_COUNT);
+      const base = 261.6256 * Math.pow(2, lo / 12);
+      const fLo = base * Math.pow(2, Math.round(Math.log2(register / base)));
       const fHi = fLo * Math.pow(2, interval / 12);   // equal temperament, as played
       if (design === 'figure') {
         const [pn, qn] = JUST[interval];

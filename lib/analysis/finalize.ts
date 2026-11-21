@@ -135,6 +135,10 @@ export function finalize(chunks: ChunkFeatures[], p: AnalysisParams, duration: n
     }
   }
 
+  // A key needs several notes: count the pitch classes holding at least 5% of the song's note energy.
+  const total = avg.reduce((x, y) => x + y, 0);
+  best.notes = total > 0 ? avg.filter((v) => v / total >= 0.05).length : 0;
+
   // Chroma per frame → proportions.
   for (let i = 0; i < F; i++) {
     let s = 0;

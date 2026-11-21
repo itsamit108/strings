@@ -140,7 +140,8 @@ export async function exportOffline(o: OfflineExportOptions): Promise<Blob | nul
   };
 
   const r = o.renderer;
-  const liveOffset = r.centerOffset, liveCompact = r.compact;
+  const liveOffset = r.centerOffset, liveCompact = r.compact, liveCalm = r.reducedMotion;
+  r.reducedMotion = false; // the video is for others: full motion
   r.governorPaused = true; // export always draws at full resolution
   r.centerOffset = 0;
   r.compact = false;
@@ -186,6 +187,7 @@ export async function exportOffline(o: OfflineExportOptions): Promise<Blob | nul
     if (aenc.state !== 'closed') aenc.close();
     r.centerOffset = liveOffset;
     r.compact = liveCompact;
+    r.reducedMotion = liveCalm;
     r.governorPaused = false;
   }
 }

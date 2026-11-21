@@ -27,6 +27,8 @@ export interface KeyEstimate {
   minor: boolean;
   name: string;
   confidence: number;
+  /** how many of the twelve notes carry at least 5% of the song's note energy */
+  notes?: number;
 }
 
 export interface Analysis extends AnalysisParams {
