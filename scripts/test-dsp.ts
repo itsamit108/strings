@@ -36,3 +36,22 @@ import('../lib/analysis/sections').then(({ planSections, DESIGN_NAMES }) => {
     console.log(`${s.start.toFixed(1).padStart(5)}–${s.end.toFixed(1).padStart(5)}s  ${DESIGN_NAMES[s.design].padEnd(16)} ${st}`);
   }
 });
+
+// The recording's decay (sets how long the light lingers), as the renderer measures it.
+{
+  const fs = a.hop / a.sampleRate, L = a.loud, O = a.onset, F = a.totalFrames;
+  const decays: number[] = [];
+  for (let f = 1; f < F - 1; f++) {
+    if (O[f] < 0.3 || O[f] < O[f - 1] || O[f] < O[f + 1]) continue;
+    let pk = f;
+    for (let g = f; g < Math.min(F, f + Math.round(0.08 / fs)); g++) if (L[g] > L[pk]) pk = g;
+    if (L[pk] < 0.15) continue;
+    let g = pk;
+    const stop = Math.min(F, pk + Math.round(3 / fs));
+    while (g < stop && L[g] > 0.5 * L[pk] && !(g > pk + 2 && O[g] > 0.3)) g++;
+    if (g < stop && L[g] <= 0.5 * L[pk]) decays.push((g - pk) * fs);
+  }
+  decays.sort((x, y) => x - y);
+  const d = decays.length >= 4 ? decays[decays.length >> 1] : 0.3;
+  console.log('decay events', decays.length, 'median', d.toFixed(2), 's -> trail', Math.min(0.2, Math.max(0.04, 0.035 + 0.12 * d)).toFixed(3), 's');
+}

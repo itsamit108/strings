@@ -41,6 +41,15 @@ uniform float uAmp;
 uniform float uWidthPx;
 uniform float uIntensity;
 out vec4 o;
+// A change of design travels out from the centre as a wave front, as a new sound spreads from its source:
+// the incoming design shows inside the front, the outgoing one outside it, with a soft equal-power edge.
+uniform vec4 uReveal;   // (centre x, centre y, radius, half edge width), pixels
+uniform float uSide;    // 0: everywhere; 1: inside the front only; -1: outside only
+float reveal() {
+  if (uSide == 0.0) return 1.0;
+  float m = smoothstep(uReveal.z - uReveal.w, uReveal.z + uReveal.w, length(gl_FragCoord.xy - uReveal.xy));
+  return uSide > 0.0 ? cos(m * 1.5707963) : sin(m * 1.5707963);
+}
 const float LINES = ${LINES_PER_RIBBON.toFixed(1)};
 float level(float row, float age) { return texture(uHist, vec2(age, (row + 0.5) / ${HIST_ROWS.toFixed(1)})).r; }
 void main() {
@@ -68,17 +77,17 @@ void main() {
     acc += col * (line + 0.045) * inside * (0.3 + 0.7 * max(eA, eB));
   }
   float edge = 1.0 - smoothstep(0.8, 1.0, age);
-  o = vec4(acc * edge * uIntensity * (0.45 + 0.55 * loud), 1.0);
+  o = vec4(acc * edge * uIntensity * reveal() * (0.45 + 0.55 * loud), 1.0);
 }`;
 
 /**
  * RINGS
- * A ring leaves the centre twice every beat and travels outward, so the
- * centre is "now" and the outer rings are the last four seconds.
- * Each ring keeps what the song was doing when it left: how bright (loudness),
- * how bold (a hit), what colour (the notes), and its shape. The twelve notes
- * sit around the circle like hours on a clock, and a ring bulges toward the
- * notes that were sounding.
+ * Each attack in the music (an onset) sends a ring out from the centre, like a wave from its source, so the
+ * rings are spaced as the rhythm is: dense in busy passages, sparse in calm ones (sustained sound sends
+ * faint rings at the beat). The centre is now; the edge is four seconds ago.
+ * A ring keeps what the song was doing when it left: its colour (the notes), and its shape (the twelve
+ * notes sit around the circle like hours on a clock, and a ring bulges toward the notes sounding).
+ * Spreading out, a wave thins: its strength falls with distance (spherical spreading) and it broadens.
  */
 export const RINGS_FS = /* glsl */ `#version 300 es
 precision highp float;
@@ -87,8 +96,8 @@ uniform sampler2D uHist;
 uniform sampler2D uShape;
 uniform vec2 uCenterPx;
 uniform float uRmax;
-uniform float uTime;
-uniform float uRingT;
+uniform vec2 uRing[32];    // (seconds since the ring left, strength 0..1)
+uniform int uRingCount;
 uniform float uWidthPx;
 uniform float uIntensity;
 out vec4 o;
@@ -99,17 +108,20 @@ void main() {
   float a01 = fract(atan(p.x, p.y) / 6.2831853);
   float shape = texture(uShape, vec2(d, a01)).r;
   float dd = d * (1.0 - 0.18 * shape);
-  float e = uTime - dd * ${HISTORY_SECONDS.toFixed(1)};  // when the sound at this pixel left the centre
-  float t = e / uRingT;
-  float g = length(vec2(dFdx(t), dFdy(t)));
-  float f = abs(fract(t + 0.5) - 0.5);
-  float dist = f / max(g, 1e-4);
-  vec4 hc = texture(uHist, vec2(dd, 8.5 / ${HIST_ROWS.toFixed(1)}));
-  float hit = texture(uHist, vec2(dd, 9.5 / ${HIST_ROWS.toFixed(1)})).r;
-  float w = uWidthPx * (1.0 + 1.8 * hit);
-  float line = exp(-dist * dist / (w * w)) + 0.1 / (1.0 + dist * dist / (25.0 * w * w));
-  float alive = step(0.0, e) * (1.0 - smoothstep(0.78, 1.0, dd));
-  o = vec4(hc.rgb * line * alive * (0.08 + 0.92 * hc.a) * (1.0 + 1.4 * hit) * uIntensity, 1.0);
+  vec3 acc = vec3(0.0);
+  for (int i = 0; i < 32; i++) {
+    if (i >= uRingCount) break;
+    float r = uRing[i].x / ${HISTORY_SECONDS.toFixed(1)};
+    float str = uRing[i].y;
+    float w = uWidthPx * (0.7 + 1.1 * str) * (1.0 + 1.3 * r);   // broadens as it travels
+    float x = (dd - r) * uRmax / w;
+    if (abs(x) > 6.0) continue;
+    vec3 c = texture(uHist, vec2(r, 8.5 / ${HIST_ROWS.toFixed(1)})).rgb;
+    float spread = 1.0 / ((1.0 + 2.2 * r) * (1.0 + 2.2 * r));    // intensity falls with the square of distance
+    acc += c * str * spread * (exp(-x * x) + 0.06 / (1.0 + 0.1 * x * x));
+  }
+  float alive = 1.0 - smoothstep(0.82, 1.0, dd);
+  o = vec4(acc * alive * uIntensity, 1.0);
 }`;
 
 /** Light → screen: the sharp lines plus their soft glow, on a dark room in the colour of the key. */
@@ -135,6 +147,12 @@ uniform vec2 uFlow;         // how far the clouds have flowed (faster with tempo
 uniform float uRot;         // how far the sky has turned (with tempo)
 uniform vec4 uHits[6];      // recent hits: (seconds since, strength, -, -)
 uniform float uWaveSpeed;   // pixels per second a hit's wave front travels
+uniform vec3 uNoteCol[4];   // light of the four strongest notes now
+uniform vec4 uNoteCum;      // their cumulative share of the sound (for picking a particle's note)
+uniform float uTonal;       // how clearly pitched the sound is (0 noise .. 1 pure notes)
+uniform float uSharp;       // timbre sharpness: 0 soft and mellow .. 1 bright and percussive
+uniform float uMoteSize;    // particle size: low register → large, high → small (pitch–size correspondence)
+uniform float uMoteDensity; // share of cells holding a mote
 // caption (title and artist)
 uniform sampler2D uCaption;
 uniform float uCaptionAlpha;
@@ -170,6 +188,9 @@ vec3 kelvin(float k) {
   c.g = t <= 66.0 ? clamp(0.39008157 * log(t) - 0.63184144, 0.0, 1.0) : clamp(1.129890861 * pow(t - 60.0, -0.0755148492), 0.0, 1.0);
   c.b = t >= 66.0 ? 1.0 : (t <= 19.0 ? 0.0 : clamp(0.54320678 * log(t - 10.0) - 1.19625408, 0.0, 1.0));
   return pow(c, vec3(2.2));
+}
+vec3 noteColour(float h) {
+  return h < uNoteCum.x ? uNoteCol[0] : h < uNoteCum.y ? uNoteCol[1] : h < uNoteCum.z ? uNoteCol[2] : uNoteCol[3];
 }
 // One layer of stars on a jittered grid. Most stars are faint; a few are bright (a steep power law, like real skies).
 // A hit sends a pressure wave out from the centre; the sky brightens briefly as its front passes.
@@ -218,9 +239,32 @@ vec3 stars(vec2 px, float cell, float density, float gain, float band) {
   float core = exp(-d * d / (r * r)) + 0.04 * mag * exp(-d / (6.0 * r)) * (1.0 - smoothstep(0.08 * cell, 0.18 * cell, d));
   // Hotter or cooler stars depending on how bright the sound is (spectral centroid ↔ colour temperature).
   float temp = mix(3200.0, 13000.0, clamp(g.x * 0.75 + (uWarm - 0.5) * 0.8 + 0.12, 0.0, 1.0));
+  // In clearly pitched music some stars take the light of the notes sounding; in noise they stay star-coloured.
+  vec3 tint = mix(kelvin(temp), noteColour(fract(g.y * 7.31 + g.z)), uTonal * 0.7 * step(g.w, 0.75));
   // Scintillation: each star flickers at its own rate, deeper when there is more treble.
   float tw = 1.0 + uTwinkle * (0.55 * sin(uTime * (2.0 + 6.0 * g.y) + 6.2832 * g.z) + 0.3 * sin(uTime * (7.0 + 9.0 * g.w) + 3.0 * g.y));
-  return kelvin(temp) * core * (0.08 + 0.9 * mag) * gain * max(tw, 0.0) * (1.0 + 3.0 * hitWave(pos));
+  return tint * core * (0.08 + 0.9 * mag) * gain * max(tw, 0.0) * (1.0 + 3.0 * hitWave(pos));
+}
+// Motes: a few larger particles that carry the sound's shape. Soft, mellow timbres make round motes;
+// sharp, bright ones make pointed motes (timbre–shape correspondence, the "bouba/kiki" effect,
+// Adeli et al. 2014). Lower sound makes larger motes (pitch–size correspondence). Colour: a note sounding.
+vec3 motes(vec2 px, float cell) {
+  vec2 c = floor(px / cell);
+  vec4 h = hash42(c + uSeed * 1.37 + 57.0);
+  if (h.x > uMoteDensity) return vec3(0.0);
+  vec4 g = hash42(c * 2.3 + uSeed + 77.0);
+  vec2 pos = (c + 0.25 + 0.5 * h.yz) * cell;
+  vec2 d = px - pos;
+  float r = uMoteSize * (0.6 + 0.8 * h.w) * uUnit / 1000.0;
+  if (length(d) > 4.0 * r) return vec3(0.0);
+  float k = 3.0 + floor(g.x * 4.0);                       // 3 to 6 points
+  float th = atan(d.y, d.x) + uTime * (g.y - 0.5) * 0.6 + 6.2832 * g.z;
+  float lobe = pow(abs(cos(0.5 * k * th)), 1.0 + 5.0 * uSharp);
+  float edge = r * mix(1.0, 0.3 + 1.1 * lobe, uSharp);
+  float q = length(d) / edge;
+  float body = exp(-q * q * 2.2);
+  float halo = 0.12 * exp(-length(d) / (1.5 * r));
+  return noteColour(g.w) * (body + halo) * (0.35 + 0.25 * g.y) * (1.0 + 2.0 * hitWave(pos));
 }
 vec3 sky(vec2 px) {
   vec2 q = px / uUnit;
@@ -238,7 +282,9 @@ vec3 sky(vec2 px) {
   vec2 flow = vec2(uFlow.x, uFlow.y) * uUnit;
   vec3 s = stars(turn(p, uRot) - flow * 1.6, uUnit / 14.0, uStarDensity, 0.9, band)
          + stars(turn(p, uRot * 0.55) - flow * 0.7 + 911.0, uUnit / 34.0, uStarDensity * 0.8, 0.45, band);
-  return neb + s;
+  // Motes float at a middle depth, between the two star layers.
+  vec3 m = motes(turn(p, uRot * 0.8) - flow * 1.15 + 433.0, uUnit / 6.0);
+  return neb + s + m * (0.4 + 0.6 * uTonal);
 }
 void main() {
   vec2 uv = gl_FragCoord.xy * uInvRes;
@@ -291,6 +337,15 @@ uniform float uIntensity;
 uniform float uJump;          // sand thrown up by a hit
 uniform float uTime;
 out vec4 o;
+// A change of design travels out from the centre as a wave front, as a new sound spreads from its source:
+// the incoming design shows inside the front, the outgoing one outside it, with a soft equal-power edge.
+uniform vec4 uReveal;   // (centre x, centre y, radius, half edge width), pixels
+uniform float uSide;    // 0: everywhere; 1: inside the front only; -1: outside only
+float reveal() {
+  if (uSide == 0.0) return 1.0;
+  float m = smoothstep(uReveal.z - uReveal.w, uReveal.z + uReveal.w, length(gl_FragCoord.xy - uReveal.xy));
+  return uSide > 0.0 ? cos(m * 1.5707963) : sin(m * 1.5707963);
+}
 float hash12(vec2 p) {
   vec3 p3 = fract(vec3(p.xyx) * 0.1031);
   p3 += dot(p3, p3.yzx + 33.33);
@@ -324,7 +379,7 @@ void main() {
   float loose = 0.03 * step(0.985, grain) * (1.0 + 4.0 * uJump);
   float rim = exp(-pow((1.0 - edge) * uHalf / (uWidthPx * 1.5), 2.0)) * 0.12;
   float inside = 1.0 - smoothstep(0.985, 1.02, edge);
-  o = vec4(col * (sand + loose + rim) * inside * uIntensity, 1.0);
+  o = vec4(col * (sand + loose + rim) * inside * uIntensity * reveal(), 1.0);
 }`;
 
 /**
@@ -346,6 +401,15 @@ uniform float uUnit;
 uniform float uWidthPx;
 uniform float uIntensity;
 out vec4 o;
+// A change of design travels out from the centre as a wave front, as a new sound spreads from its source:
+// the incoming design shows inside the front, the outgoing one outside it, with a soft equal-power edge.
+uniform vec4 uReveal;   // (centre x, centre y, radius, half edge width), pixels
+uniform float uSide;    // 0: everywhere; 1: inside the front only; -1: outside only
+float reveal() {
+  if (uSide == 0.0) return 1.0;
+  float m = smoothstep(uReveal.z - uReveal.w, uReveal.z + uReveal.w, length(gl_FragCoord.xy - uReveal.xy));
+  return uSide > 0.0 ? cos(m * 1.5707963) : sin(m * 1.5707963);
+}
 void main() {
   vec2 p = gl_FragCoord.xy;
   float h = 0.0, total = 0.0;
@@ -367,7 +431,7 @@ void main() {
   float crest = max(0.0, c);
   float line = pow(crest, 14.0) + 0.9 * exp(-pow((1.0 - crest) / max(g * uWidthPx * 1.5, 1e-4), 2.0)) * crest;
   float fadeOut = 1.0 - smoothstep(0.55, 0.75, length((p - 0.5 * (uSrc[0] + uSrc[1])) / uUnit));
-  o = vec4(col * (line + 0.03 * crest) * fadeOut * uIntensity, 1.0);
+  o = vec4(col * (line + 0.03 * crest) * fadeOut * uIntensity * reveal(), 1.0);
 }`;
 
 /**
@@ -390,6 +454,15 @@ uniform float uLines;
 uniform float uWidthPx;
 uniform float uIntensity;
 out vec4 o;
+// A change of design travels out from the centre as a wave front, as a new sound spreads from its source:
+// the incoming design shows inside the front, the outgoing one outside it, with a soft equal-power edge.
+uniform vec4 uReveal;   // (centre x, centre y, radius, half edge width), pixels
+uniform float uSide;    // 0: everywhere; 1: inside the front only; -1: outside only
+float reveal() {
+  if (uSide == 0.0) return 1.0;
+  float m = smoothstep(uReveal.z - uReveal.w, uReveal.z + uReveal.w, length(gl_FragCoord.xy - uReveal.xy));
+  return uSide > 0.0 ? cos(m * 1.5707963) : sin(m * 1.5707963);
+}
 void main() {
   vec2 p = (gl_FragCoord.xy - uCenterPx) / uRadius;
   float r = length(p);
@@ -410,5 +483,5 @@ void main() {
   float inside = 1.0 - smoothstep(0.92, 1.0, R);
   float k = clamp(R, 0.0, 1.0);
   vec3 col = mix(uColIn, uColOut, k);
-  o = vec4(col * line * inside * step(0.04, R) * (0.55 + 0.45 * k) * uIntensity, 1.0);
+  o = vec4(col * line * inside * step(0.04, R) * (0.55 + 0.45 * k) * uIntensity * reveal(), 1.0);
 }`;

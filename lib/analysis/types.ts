@@ -55,6 +55,8 @@ export interface Analysis extends AnalysisParams {
   arc: Float32Array;
   /** pitch-colour angle (0..1) of each timeline point */
   arcHue: Float32Array;
+  /** where the sound sits between the speakers in each frame: -1 left .. 0 centre .. +1 right */
+  pan?: Float32Array;
 }
 
 export type WorkerRequest =

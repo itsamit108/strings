@@ -210,6 +210,32 @@ export class PlateRenderer {
   /** the sky's motion: cloud flow, turn, and the last few hits sending waves outward */
   private skyFlow = [0, 0];
   private skyRot = 0;
+  /** background hue, following the harmony sounding (NaN until the first frame) */
+  private bgHue = Number.NaN;
+  private timbreSharp = 0.3;
+  /** a change's wave front (centre x, centre y, radius, edge) and which side of it the design being drawn shows */
+  private front = [0, 0, 0, 1];
+  private side = 0;
+  /** smoothed stereo balance now, -1 left .. +1 right */
+  private panNow = 0;
+  /** smoothed log2 of the register, and how fast it is moving (octaves per second) */
+  private regLog = Number.NaN;
+  private pitchSlope = 0;
+  /** which way the sky turns now (-1..1), easing through a stop when it reverses */
+  private turnDir = 1;
+  /** seconds a line's light lingers: this recording's own decay */
+  private trail = TRAIL;
+  /** when each ring leaves the centre and how strong it is: (seconds, strength) pairs, in time order */
+  private ringEvents: Float32Array | null = null;
+  /** the sky's current drift velocity and turning speed (they glide, never jump) */
+  private flowVel = [Number.NaN, Number.NaN];
+  private rotVel = Number.NaN;
+  /** title/label drawn as page layers at the screen's full resolution (sharp), outside exports */
+  private textOnPage = false;
+  /** Hz: where the spectrum's energy sits now (the music's register) */
+  private register = 300;
+  /** how clearly pitched the sound is now, 0..1 */
+  private tonal = 0.5;
   private hits = new Float32Array(12); // (time, strength) × 6
   private hitNext = 0;
   private lastHit = -1;
@@ -320,6 +346,16 @@ export class PlateRenderer {
     this.lastHit = -1;
     this.skyFlow = [0, 0];
     this.skyRot = 0;
+    this.bgHue = Number.NaN;
+    this.timbreSharp = 0.3;
+    this.panNow = 0;
+    this.regLog = Number.NaN;
+    this.pitchSlope = 0;
+    this.turnDir = 1;
+    this.flowVel = [Number.NaN, Number.NaN];
+    this.rotVel = Number.NaN;
+    this.register = 300;
+    this.tonal = 0.5;
     this.ripplePhase.fill(0);
     for (let n = 0; n < 9; n++) this.membraneTurn[n] = 2 * Math.PI * hash01((seed >>> 0) + 101 * n);
     this.membranePhase.fill(0);
@@ -382,7 +418,45 @@ export class PlateRenderer {
       for (let i = 0; i < analysis.totalFrames; i++) { b += analysis.bright[i]; o += analysis.onset[i]; }
       this.songBright = b / Math.max(1, analysis.totalFrames);
       this.songBusy = o / Math.max(1, analysis.totalFrames);
-    }
+      // How long this recording's sound rings after each attack (its decay, from the instruments and the
+      // room's reverberation): the time for loudness to fall to half after each clear onset, median.
+      const fs = analysis.hop / analysis.sampleRate, L = analysis.loud, O = analysis.onset, F = analysis.totalFrames;
+      const decays: number[] = [];
+      for (let f = 1; f < F - 1; f++) {
+        if (O[f] < 0.3 || O[f] < O[f - 1] || O[f] < O[f + 1]) continue;
+        let pk = f;
+        for (let g = f; g < Math.min(F, f + Math.round(0.08 / fs)); g++) if (L[g] > L[pk]) pk = g;
+        if (L[pk] < 0.15) continue;
+        let g = pk;
+        const stop = Math.min(F, pk + Math.round(3 / fs));
+        while (g < stop && L[g] > 0.5 * L[pk] && !(g > pk + 2 && O[g] > 0.3)) g++;
+        if (g < stop && L[g] <= 0.5 * L[pk]) decays.push((g - pk) * fs);
+      }
+      decays.sort((x, y) => x - y);
+      const d = decays.length >= 4 ? decays[decays.length >> 1] : 0.3;
+      this.trail = Math.min(0.2, Math.max(0.04, 0.035 + 0.12 * d));
+      // Rings: one for each attack (a peak in the onset strength), stronger for a bigger, louder attack.
+      // Where nothing attacks for longer than a beat, sustained sound still radiates: faint rings at the beat.
+      const evs: number[] = [];
+      const beat = analysis.beatPeriod;
+      let last = -1e9;
+      const push = (t: number, s: number) => { evs.push(t, Math.min(1, s)); last = t; };
+      for (let f = 3; f < F - 3; f++) {
+        const t = f * fs;
+        let peak = O[f] >= 0.2;
+        for (let g = f - 3; peak && g <= f + 3; g++) if (O[g] > O[f]) peak = false;
+        if (peak && t - last >= 0.1) {
+          while (t - last > 1.5 * beat && last > -1e8) { const tb = last + beat; const lf = Math.min(F - 1, Math.round(tb / fs)); if (L[lf] > 0.04) push(tb, 0.15 + 0.3 * L[lf]); else last = tb; }
+          push(t, 0.3 + O[f] * (0.4 + L[f]));
+        } else if (t - last >= beat && last > -1e8 && !peak) {
+          // look ahead: only fill if no attack is about to come
+          let soon = false;
+          for (let g = f; g < Math.min(F, f + Math.round(0.15 / fs)); g++) if (O[g] >= 0.2) soon = true;
+          if (!soon) { if (L[f] > 0.04) push(t, 0.15 + 0.3 * L[f]); else last = t; }
+        } else if (last < -1e8 && L[f] > 0.04) push(t, 0.15 + 0.3 * L[f]);
+      }
+      this.ringEvents = Float32Array.from(evs);
+    } else { this.trail = TRAIL; this.ringEvents = null; }
   }
 
   /** Title and artist, shown on the picture at the start of the song (and so in the exported video). */
@@ -396,12 +470,34 @@ export class PlateRenderer {
    * stays for the rest of the song. In 9:16 the label sits above the area Reels and Shorts cover with
    * their own buttons and text.
    */
+  /**
+   * Shows the title, artist and credit as page layers over the picture, drawn at the screen's full
+   * resolution, so they stay sharp even when the picture is drawn at a lower one. Exports still draw
+   * them into the picture itself.
+   */
+  showTextOnPage(on: boolean) {
+    this.textOnPage = on;
+    if (typeof document === 'undefined') return;
+    for (const c of [this.captionCanvas ?? (this.captionCanvas = document.createElement('canvas')),
+      this.labelCanvas ?? (this.labelCanvas = document.createElement('canvas'))]) {
+      if (on) {
+        c.className = 'plate plate-text';
+        c.setAttribute('aria-hidden', 'true');
+        c.style.opacity = '0';
+        this.canvas.after(c);
+      } else c.remove();
+    }
+    this.captionKey = '';
+  }
+  private get textSharp() { return this.textOnPage && !this.governorPaused; }
+
   private drawCaption() {
     if (this.lost || typeof document === 'undefined') return;
-    const W = this.width, H = this.height, gl = this.gl;
+    const sharp = this.textSharp;
+    const W = sharp ? Math.max(2, Math.round(this.askedW)) : this.width, H = sharp ? Math.max(2, Math.round(this.askedH)) : this.height, gl = this.gl;
     const { title, artist, show } = this.caption;
     // Redraw only when something it shows has changed (resizes and safe-area updates come often).
-    const key = `${W}x${H}|${title}|${artist}|${show}|${this.safeTop.toFixed(3)}`;
+    const key = `${W}x${H}|${sharp}|${title}|${artist}|${show}|${this.safeTop.toFixed(3)}`;
     if (key === this.captionKey) return;
     this.captionKey = key;
     const unit = Math.min(W, H), tall = H > W;
@@ -607,16 +703,20 @@ export class PlateRenderer {
     const mood = a ? valence(minor, a.bpm) : 0;
     const keyHue = mixHue(NOTE_HUES[tonic], mood >= 0 ? YELLOW_HUE : BLUE_HUE, 0.08 * Math.abs(mood));
     const keyColour = vivid(0.74, keyHue, 0.9);
-    // A deep room in the key's colour: the darker it is, the more the light stands out.
-    const bg = oklch(0.1 + 0.015 * mood, 0.03, keyHue);
     const now = notesHue(this.chroma);
+    // A deep room in the colour of the harmony: it starts in the key's colour and follows the notes
+    // sounding, slowly (a few seconds), so each section and each song has its own room. Louder music
+    // lights the room a little and saturates it (loudness ↔ brightness and saturation).
+    const bgTarget = a ? mixHue(keyHue, now.hue, 0.75 * now.clarity) : keyHue;
+    this.bgHue = Number.isNaN(this.bgHue) ? bgTarget : mixHue(this.bgHue, bgTarget, ease(3));
+    const bg = oklch(0.088 + 0.015 * mood + 0.03 * this.energy, 0.02 + 0.03 * this.energy + 0.015 * now.clarity, this.bgHue);
 
     const W = this.width, H = this.height, unit = Math.min(W, H);
     this.readHistory(time, keyColour);
 
     // ---- light buffer -----------------------------------------------------
     // During a change of design the light lingers longer, like a reverb tail, so one dissolves into the next.
-    const fade = Math.exp(-dt / (TRAIL + 0.28 * this.blend));
+    const fade = Math.exp(-dt / (this.trail + 0.28 * this.blend));
     const level = (1 - fade) * (0.5 + 0.5 * this.live) * (0.8 + 0.45 * this.energy + 0.5 * this.kick);
     gl.bindVertexArray(this.vao);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.accum.fbo);
@@ -636,9 +736,40 @@ export class PlateRenderer {
     // ---- the sky moves with the music --------------------------------------
     const tempo = a ? a.bpm / 120 : 0.5;
     const flowSpeed = (0.006 + 0.022 * this.energy) * tempo * (this.reducedMotion ? 0.3 : 1);
-    this.skyFlow[0] += flowSpeed * dt * (0.8 + 0.4 * Math.sin(0.05 * time));
-    this.skyFlow[1] += flowSpeed * dt * 0.35;
-    this.skyRot += 0.0045 * tempo * (0.6 + 0.8 * this.energy) * dt * (this.reducedMotion ? 0.3 : 1);
+    // Which way the particles drift comes from the sound, not a fixed direction:
+    //  - sideways: sound radiates away from its source, so music on the right pushes them left (stereo balance);
+    //  - up and down: rising pitch carries them up, falling pitch down (pitch-height correspondence);
+    //  - at rest (centred, steady pitch): the song's own direction, from its fingerprint.
+    const fp = a ? a.seed >>> 0 : 17;
+    let pan = 0;
+    if (a?.pan && playing) pan = a.pan[Math.min(a.pan.length - 1, Math.max(0, Math.floor((time * a.sampleRate) / a.hop)))];
+    this.panNow += (pan - this.panNow) * ease(0.6);
+    const lr = Math.log2(Math.max(40, this.register));
+    if (Number.isNaN(this.regLog) || jumped) this.regLog = lr;
+    const prevLog = this.regLog;
+    this.regLog += (lr - this.regLog) * ease(0.5);
+    const slope = dt > 0 && !jumped ? Math.max(-2, Math.min(2, (this.regLog - prevLog) / dt)) : 0;
+    this.pitchSlope += (slope - this.pitchSlope) * ease(1.2);
+    const rest = 2 * Math.PI * hash01(fp * 13 + 5);
+    const vx = 0.45 * Math.cos(rest) - 1.6 * this.panNow, vy = 0.45 * Math.sin(rest) + 1.4 * this.pitchSlope;
+    const vm = Math.hypot(vx, vy), vs = vm > 1e-6 ? Math.min(2.2, vm) / vm / 0.45 : 0;
+    // Particles have inertia: their velocity (speed and direction) glides to the new one over about two
+    // seconds, so the sky never jerks when the music, the pitch or the song changes.
+    const tx = flowSpeed * vx * vs, ty = flowSpeed * vy * vs;
+    if (Number.isNaN(this.flowVel[0])) this.flowVel = [tx, ty];
+    this.flowVel[0] += (tx - this.flowVel[0]) * ease(2);
+    this.flowVel[1] += (ty - this.flowVel[1]) * ease(2);
+    this.skyFlow[0] += this.flowVel[0] * dt;
+    this.skyFlow[1] += this.flowVel[1] * dt;
+    // The sky turns one way through a section and the other way through the next, easing through a stop
+    // at each change of section; the song's fingerprint picks which way it starts.
+    let si = 0;
+    for (let i = 0; i < this.sections.length; i++) if (time >= this.sections[i].start) si = i;
+    const turnTo = (hash01(fp * 7 + 3) < 0.5 ? 1 : -1) * (si % 2 ? -1 : 1);
+    this.turnDir += (turnTo - this.turnDir) * ease(2.5);
+    const spin = 0.0045 * tempo * (0.6 + 0.8 * this.energy) * (this.reducedMotion ? 0.3 : 1) * this.turnDir;
+    this.rotVel = Number.isNaN(this.rotVel) ? spin : this.rotVel + (spin - this.rotVel) * ease(2);
+    this.skyRot += this.rotVel * dt;
     // A clear onset sends a wave out from the centre (at most one per quarter second).
     if (a && playing && !this.reducedMotion && (onset > 0.35 || this.bassHit > 0.5) && time - this.lastHit > 0.25) {
       this.hits[this.hitNext * 2] = time;
@@ -684,20 +815,36 @@ export class PlateRenderer {
       const base = 261.6256 * Math.pow(2, pc / 12);
       return base * Math.pow(2, Math.round(Math.log2(register / base)));
     });
-    const voiceWide = 1 + 0.35 * this.voiceNow;
+    this.register = register;
+    this.tonal = a ? now.clarity : 0.5;
+    // Low sound has long waves: lines are thicker in a low register and finer in a high one.
+    const regWidth = Math.min(1.45, Math.max(0.75, Math.sqrt(330 / register)));
+    const voiceWide = (1 + 0.35 * this.voiceNow) * regWidth;
     const ctx: DrawCtx = { W, H, unit, time, dt, ease, level: level * (1 + 0.35 * this.bassHit) * (1 + 0.3 * this.voiceNow + 0.35 * this.voiceIn), tonic, minor, mood, now, cx: W / 2, cy: H * (0.5 + this.centerOffset), order, pulse, voiceWide, noteHz };
 
-    const plan = !a ? { shown: [{ design: 'ribbons' as Design, weight: 1 }], blend: 0 }
-      : this.force ? { shown: [{ design: this.force, weight: 1 }], blend: 0 }
+    const plan = !a ? { shown: [{ design: 'ribbons' as Design, weight: 1 }], blend: 0, progress: -1 }
+      : this.force ? { shown: [{ design: this.force, weight: 1 }], blend: 0, progress: -1 }
       : designsAt(this.sections, time);
     const shown = plan.shown;
     this.blend = plan.blend;
     let top = shown[0];
     for (const d of shown) if (d.weight > top.weight) top = d;
     this.current = top.design;
-    for (const { design, weight } of shown) {
-      if (weight < 0.002) continue;
-      this.draw(design, ctx, weight);
+    if (shown.length === 2 && plan.progress >= 0 && !this.reducedMotion) {
+      // The new design spreads from the centre at a steady speed, reaching the farthest corner as the change ends.
+      const edge = 0.16 * unit;
+      const far = Math.hypot(Math.max(ctx.cx, W - ctx.cx), Math.max(ctx.cy, H - ctx.cy));
+      this.front = [ctx.cx, ctx.cy, -edge + plan.progress * (far + 2 * edge), edge];
+      this.side = -1;
+      this.draw(shown[0].design, ctx, 1);
+      this.side = 1;
+      this.draw(shown[1].design, ctx, 1);
+      this.side = 0;
+    } else {
+      for (const { design, weight } of shown) {
+        if (weight < 0.002) continue;
+        this.draw(design, ctx, weight);
+      }
     }
 
     gl.activeTexture(gl.TEXTURE0);
@@ -741,6 +888,31 @@ export class PlateRenderer {
     }
     gl.uniform4fv(pr.u.uHits, hits);
     // A hit's wave front reaches the edge of the picture in one bar (four beats).
+    // Particles: the strongest notes' light; shape from timbre sharpness; size from register.
+    {
+      const ordered = Array.from({ length: 12 }, (_, pc) => pc).sort((x, y) => this.chroma[y] - this.chroma[x]).slice(0, 4);
+      const w = ordered.map((pc) => Math.max(0, this.chroma[pc]) + 1e-4);
+      const sum = w.reduce((x, y) => x + y, 0);
+      const cols = new Float32Array(12);
+      let acc = 0;
+      const cum = [0, 0, 0, 0];
+      ordered.forEach((pc, i) => {
+        cols.set(this.tone(pc, 0.72, 0.95), i * 3);
+        acc += w[i] / sum;
+        cum[i] = acc;
+      });
+      cum[3] = 1.01;
+      gl.uniform3fv(pr.u.uNoteCol, cols);
+      gl.uniform4f(pr.u.uNoteCum, cum[0], cum[1], cum[2], cum[3]);
+      gl.uniform1f(pr.u.uTonal, a ? now.clarity : 0.3);
+      // Sharpness: high-frequency share of the spectrum (centroid), treble, and attack (onsets).
+      const sharpTarget = Math.min(1, Math.max(0, 0.45 * this.brightness + 0.25 * this.songBright + 0.6 * this.trebleE + 0.5 * this.kick - 0.1));
+      this.timbreSharp += (sharpTarget - this.timbreSharp) * ease(0.8);
+      gl.uniform1f(pr.u.uSharp, this.timbreSharp);
+      // Register 60 Hz → size 9, 2 kHz → size 3 (∝ 1/√f).
+      gl.uniform1f(pr.u.uMoteSize, Math.min(10, Math.max(2.5, 9 * Math.sqrt(60 / Math.max(60, register)) * (1 + 0.25 * this.bassNow))));
+      gl.uniform1f(pr.u.uMoteDensity, a ? Math.min(0.4, 0.08 + 0.25 * this.energy + 0.15 * this.voiceNow + 1.2 * this.songBusy) : 0.12);
+    }
     gl.uniform1f(pr.u.uWaveSpeed, (0.5 * Math.hypot(W, H)) / (4 * (a?.beatPeriod ?? 0.6)));
     // Title and artist: large, rising in over the first seconds; then a small label for the rest of the song,
     // a little brighter when the music is louder.
@@ -749,16 +921,52 @@ export class PlateRenderer {
     const labA = on ? smooth01(6.2, 7.8, time) * (0.62 + 0.3 * this.energy + 0.08 * this.kick) : 0;
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this.labelTex);
+    this.drawCaption();
+    const sharp = this.textSharp;
+    const lift = this.reducedMotion ? 0 : (1 - smooth01(0.3, 2.2, time)) * 0.015;
     gl.uniform1i(pr.u.uLabel, 5);
-    gl.uniform1f(pr.u.uLabelAlpha, labA);
+    gl.uniform1f(pr.u.uLabelAlpha, sharp ? 0 : labA);
     this.labelAlpha = labA;
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.captionTex);
     gl.uniform1i(pr.u.uCaption, 3);
-    gl.uniform1f(pr.u.uCaptionAlpha, capA);
+    gl.uniform1f(pr.u.uCaptionAlpha, sharp ? 0 : capA);
     this.captionAlpha = capA;
-    gl.uniform1f(pr.u.uCaptionLift, this.reducedMotion ? 0 : (1 - smooth01(0.3, 2.2, time)) * 0.015);
+    gl.uniform1f(pr.u.uCaptionLift, lift);
+    if (this.textOnPage && this.captionCanvas && this.labelCanvas) {
+      const set = (c: HTMLCanvasElement, v: string) => { if (c.style.opacity !== v) c.style.opacity = v; };
+      set(this.captionCanvas, sharp ? capA.toFixed(3) : '0');
+      set(this.labelCanvas, sharp ? labA.toFixed(3) : '0');
+      const t = `translateY(${(-lift * 100).toFixed(3)}%)`;
+      if (this.captionCanvas.style.transform !== t) this.captionCanvas.style.transform = t;
+    }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /**
+   * A note's light as this sound plays it. A note is its fundamental plus overtones; the 3rd harmonic
+   * sounds a fifth above (an octave up) and the 5th a major third above (two octaves up). The brighter the
+   * timbre (more energy high in the spectrum), the stronger those overtones, so the light of a bright
+   * instrument's note takes some of its fifth's and third's light; a pure, mellow tone keeps its own.
+   */
+  private toneHue(pc: number): number {
+    const rich = Math.min(1, Math.max(0, 0.7 * this.brightness + 0.3 * this.songBright));
+    const h3 = mixHue(NOTE_HUES[pc], NOTE_HUES[(pc + 7) % 12], 0.32 * rich * rich);
+    return mixHue(h3, NOTE_HUES[(pc + 4) % 12], 0.14 * rich * rich);
+  }
+  /** Lightness from register (pitch ↔ lightness): low music deeper, high music lighter. */
+  private registerLift(): number {
+    return 0.06 * Math.max(-1, Math.min(1, Math.log2(this.register / 330) / 2));
+  }
+  private tone(pc: number, L: number, sat: number): [number, number, number] {
+    return vivid(L + 0.07 * (this.brightness - 0.5) + this.registerLift(), this.toneHue(pc), Math.min(1, sat * (0.75 + 0.25 * this.tonal)));
+  }
+
+  private use(p: Program) {
+    const gl = this.gl;
+    gl.useProgram(p.p);
+    gl.uniform4f(p.u.uReveal, this.front[0], this.front[1], this.front[2], this.front[3]);
+    gl.uniform1f(p.u.uSide, this.side);
   }
 
   /** Draws one design into the light buffer at `weight` of its full strength. */
@@ -766,11 +974,10 @@ export class PlateRenderer {
     const gl = this.gl;
     const { W, H, unit, ease } = c;
     const lvl = c.level * weight;
-    const note = (pc: number, L = 0.72, sat = 0.95) =>
-      vivid(L + 0.07 * (this.brightness - 0.5), NOTE_HUES[pc], Math.min(1, sat * (0.85 + 0.15 * this.energy + 0.3 * this.kick)));
+    const note = (pc: number, L = 0.72, sat = 0.95) => this.tone(pc, L, sat * (0.85 + 0.15 * this.energy + 0.3 * this.kick));
     if (design === 'ribbons') {
       const p = this.prog.ribbons;
-      gl.useProgram(p.p);
+      this.use(p);
       gl.uniform1i(p.u.uHist, 1);
       gl.uniform2f(p.u.uRes, W, H);
       const tall = H > W && !this.compact;
@@ -788,11 +995,11 @@ export class PlateRenderer {
         centres[k] = H * (0.5 + this.centerOffset + gap * (k - (S.RIBBONS - 1) / 2)); // bass at the bottom
         cycles[k] = RIBBON_CYCLES[k] * stretch;
         phase[k] = this.seedPhase[k] + RIBBON_SPEED[k] * motion;
-        const target = mixHue(NOTE_HUES[tones[k]], c.now.hue, 0.4 * c.now.clarity * this.live);
+        const target = mixHue(this.toneHue(tones[k]), c.now.hue, 0.4 * c.now.clarity * this.live);
         const h = Number.isNaN(this.ribbonHue[k]) ? target : mixHue(this.ribbonHue[k], target, ease(0.5));
         this.ribbonHue[k] = h;
-        const L = 0.66 + 0.045 * k + lift; // higher pitch, lighter
-        const rs = sat * (1 - 0.06 * k);   // lower register, more saturated
+        const L = 0.66 + 0.045 * k + lift + this.registerLift(); // higher pitch, lighter
+        const rs = sat * (1 - 0.06 * k) * (0.75 + 0.25 * this.tonal); // lower register, more saturated; noise, less
         colA.set(vivid(L, h, rs), k * 3);
         colB.set(vivid(L + 0.08, h + 0.05, rs * 0.92), k * 3);
       }
@@ -807,19 +1014,33 @@ export class PlateRenderer {
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     } else if (design === 'rings') {
       const p = this.prog.rings;
-      gl.useProgram(p.p);
+      this.use(p);
       gl.uniform1i(p.u.uHist, 1);
       gl.uniform1i(p.u.uShape, 2);
       gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
       gl.uniform1f(p.u.uRmax, 0.45 * unit * c.pulse);
-      gl.uniform1f(p.u.uTime, c.time);
-      gl.uniform1f(p.u.uRingT, (this.analysis?.beatPeriod ?? 0.6) / 2);
-      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.5 * c.voiceWide);
-      gl.uniform1f(p.u.uIntensity, lvl * 1.5);
+      // The rings in flight: every attack of the last four seconds (newest 32).
+      const ev = this.ringEvents, rings = new Float32Array(64);
+      let n = 0;
+      if (ev) {
+        let lo = 0, hi = ev.length / 2;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (ev[m * 2] <= c.time) lo = m + 1; else hi = m; }
+        for (let k = lo - 1; k >= 0 && n < 32; k--) {
+          const age = c.time - ev[k * 2];
+          if (age > S.HISTORY_SECONDS) break;
+          rings[n * 2] = age; rings[n * 2 + 1] = ev[k * 2 + 1]; n++;
+        }
+      } else {
+        for (let k = 0; k < 13; k++) { rings[k * 2] = (c.time % 0.3) + k * 0.3; rings[k * 2 + 1] = 0.5; n++; }
+      }
+      gl.uniform2fv(p.u.uRing, rings);
+      gl.uniform1i(p.u.uRingCount, n);
+      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.3 * c.voiceWide);
+      gl.uniform1f(p.u.uIntensity, lvl * 2.2);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     } else if (design === 'plate') {
       const p = this.prog.plate;
-      gl.useProgram(p.p);
+      this.use(p);
       const modes = new Float32Array(36), cols = new Float32Array(36);
       for (let pc = 0; pc < 12; pc++) {
         // Which of the two equal-frequency combinations each note shows is fixed per song (its fingerprint).
@@ -843,7 +1064,7 @@ export class PlateRenderer {
       if (this.plateW[notes[1]] < 0.15 * top) notes[1] = notes[0]; // one note: two sources in unison
       const n = notes.length;
       const p = this.prog.ripples;
-      gl.useProgram(p.p);
+      this.use(p);
       // Sources on a circle, turned by the song's fingerprint; with two, across the picture's long side.
       const R = 0.11 * Math.max(W, H) * (n === 2 ? 1 : 0.9);
       const turn = n === 2 ? (H > W ? Math.PI / 2 : 0) : this.membraneTurn[0];
@@ -868,12 +1089,12 @@ export class PlateRenderer {
       gl.uniform1fv(p.u.uAmp, amp);
       gl.uniform3fv(p.u.uCol, col);
       gl.uniform1f(p.u.uUnit, unit);
-      gl.uniform1f(p.u.uWidthPx, 1.2);
+      gl.uniform1f(p.u.uWidthPx, 1.2 * c.voiceWide);
       gl.uniform1f(p.u.uIntensity, lvl * 1.4);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     } else if (design === 'membrane') {
       const p = this.prog.membrane;
-      gl.useProgram(p.p);
+      this.use(p);
       gl.activeTexture(gl.TEXTURE4);
       gl.bindTexture(gl.TEXTURE_2D, this.besselTex);
       gl.uniform1i(p.u.uBessel, 4);
@@ -897,7 +1118,7 @@ export class PlateRenderer {
       gl.uniform1fv(p.u.uAmp, amp);
       gl.uniform1fv(p.u.uTurn, this.membraneTurn);
       const inner = note(c.order[0], 0.76);
-      const outer = vivid(0.7, mixHue(NOTE_HUES[c.tonic], NOTE_HUES[(c.tonic + 7) % 12], 0.5), 0.9);
+      const outer = vivid(0.7 + this.registerLift(), mixHue(this.toneHue(c.tonic), this.toneHue((c.tonic + 7) % 12), 0.5), 0.9 * (0.75 + 0.25 * this.tonal));
       gl.uniform3f(p.u.uColIn, inner[0], inner[1], inner[2]);
       gl.uniform3f(p.u.uColOut, outer[0], outer[1], outer[2]);
       // Brighter sound (higher spectral centroid) has shorter waves: more, finer rings (8 to 20).
@@ -910,6 +1131,8 @@ export class PlateRenderer {
 
 
   dispose() {
+    this.captionCanvas?.remove();
+    this.labelCanvas?.remove();
     this.canvas.removeEventListener('webglcontextlost', this.onLost);
     this.canvas.removeEventListener('webglcontextrestored', this.onRestored);
     if (this.lost) return;

@@ -264,4 +264,6 @@ dialog input[type='checkbox'] { width: 1.1rem; height: 1.1rem; accent-color: var
 }
 
 /* While a video is being made the canvas shows it at the video's own size; dimmed so it reads as busy. */
+/* Title, artist and credit, drawn at the screen's full resolution over the picture. */
+.plate.plate-text { background: transparent; pointer-events: none; }
 .plate.exporting { opacity: 0.55; transition: opacity 0.3s ease; }

@@ -69,5 +69,18 @@ export async function analyzeAudio(buffer: AudioBuffer, onProgress?: (fraction: 
   } finally {
     workers.forEach((w) => w.terminate());
   }
-  return finalize(chunks, params, buffer.duration);
+  const result = finalize(chunks, params, buffer.duration);
+  // Stereo balance: the share of each frame's energy in the right channel against the left.
+  if (buffer.numberOfChannels >= 2) {
+    const L = buffer.getChannelData(0), R = buffer.getChannelData(1);
+    const pan = new Float32Array(params.totalFrames);
+    for (let f = 0; f < params.totalFrames; f++) {
+      let el = 0, er = 0;
+      const end = Math.min(length, (f + 1) * hop);
+      for (let i = f * hop; i < end; i++) { el += L[i] * L[i]; er += R[i] * R[i]; }
+      pan[f] = el + er > 1e-9 ? (er - el) / (er + el) : 0;
+    }
+    result.pan = pan;
+  }
+  return result;
 }

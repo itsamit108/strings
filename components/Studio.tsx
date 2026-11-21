@@ -132,6 +132,7 @@ export default function Studio() {
     let r: PlateRenderer;
     try {
       r = new PlateRenderer(canvas);
+      r.showTextOnPage(true);
     } catch (e) {
       setError((e as Error).message);
       return;
@@ -808,7 +809,9 @@ export default function Studio() {
         <p>
           The song is split where the music changes: each moment is compared with every other, and a boundary is
           placed where what follows differs most from what came before, a voice coming in included. Each part gets
-          the picture that fits what it does, and the pictures cross-fade at the boundary.
+          the picture that fits what it does. Each change lands on the beat where the music changes and spreads out
+          from the centre as a wave front, as a new sound travels from its source, taking as long as the change in
+          the music does.
         </p>
         <h4>Plate</h4>
         <p>
@@ -830,14 +833,20 @@ export default function Studio() {
         <h4>Ribbons and Rings</h4>
         <p>
           Ribbons: the middle is now and the edges are four seconds ago; each ribbon is a pitch range, bass at the
-          bottom. Rings: one leaves the centre every half beat, keeping the loudness, hits and notes of its moment.
+          bottom. Rings: one leaves the centre with each attack in the music (faint ones at the beat through sustained sound), keeping the colour and notes of its moment, and fades as it spreads, as a real wave does.
         </p>
         <h4>Colour and sky</h4>
         <p>
           A note&apos;s colour is its frequency raised by about forty octaves into visible light: C green, D blue,
-          E violet, G red, A orange. Louder is more vivid, higher is lighter. Stars are coloured like real stars, by
-          temperature: brighter-sounding songs have hotter, bluer stars. Treble makes them twinkle, bass lights the
-          nebula, and every hit sends a faint wave across the sky.
+          E violet, G red, A orange. Louder is more vivid, lower music deeper and higher music lighter. A bright
+          timbre carries strong overtones (the fifth and the third above), so its notes take some of their light;
+          a pure tone keeps its own. Noisy sound is less vivid. The room behind follows the harmony. Stars are
+          coloured by temperature: brighter-sounding songs have hotter, bluer stars, and in clearly pitched music
+          some take the notes&apos; light. A few larger motes are round for soft sound and pointed for sharp,
+          bright sound, larger when the music is low. Everything drifts away from where the sound sits between the
+          speakers, rises with rising pitch and falls with falling pitch, with a little inertia. Treble makes stars
+          twinkle, bass lights the nebula, every hit sends a faint wave across the sky, and lines linger as long as
+          the recording&apos;s own sound does.
         </p>
         <div className="actions"><button className="outline" onClick={() => aboutDialog.current?.close()}>Close</button></div>
       </dialog>

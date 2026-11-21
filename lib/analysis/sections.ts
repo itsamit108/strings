@@ -224,6 +224,16 @@ function raw(s: SectionStats): Record<Design, number> {
 export function planSections(a: Analysis): Section[] {
   const { score, blockSeconds } = novelty(a);
   const cuts = boundaries(score, blockSeconds, a.duration);
+  // The novelty curve finds where the music changes to within a block; move each change onto the
+  // strongest onset nearby (within most of a beat), so the picture changes exactly when the sound does.
+  const frameSec = a.hop / a.sampleRate, reach = Math.max(0.3, 0.75 * a.beatPeriod);
+  for (let c = 1; c < cuts.length - 1; c++) {
+    const lo = Math.max(cuts[c - 1] + 1, cuts[c] - reach), hi = Math.min(cuts[c + 1] - 1, cuts[c] + reach);
+    let best = -1, bestOn = 0;
+    for (let f = Math.ceil(lo / frameSec); f <= Math.floor(hi / frameSec) && f < a.onset.length; f++)
+      if (a.onset[f] > bestOn) { bestOn = a.onset[f]; best = f; }
+    if (best >= 0 && bestOn > 0.15) cuts[c] = best * frameSec;
+  }
   const stats = cuts.slice(0, -1).map((t, k) => measure(a, t, cuts[k + 1]));
   const raws = stats.map(raw);
   // Compare each design's score with the same design elsewhere in this song (z-scores),
@@ -253,10 +263,8 @@ export function planSections(a: Analysis): Section[] {
     out.push({ start: cuts[i], end: cuts[i + 1], design: best, stats: stats[i], fade: changeWidth(score, blockSeconds, cuts[i], a.beatPeriod) });
     prev = best;
   }
-  // A change can take no longer than the shorter of the two parts it joins, so two changes never overlap.
-  for (let i = 1; i < out.length; i++) {
-    out[i].fade = Math.min(out[i].fade, out[i - 1].end - out[i - 1].start, out[i].end - out[i].start);
-  }
+  // A change happens inside the part it opens and takes at most half of it, so two changes never overlap.
+  for (let i = 1; i < out.length; i++) out[i].fade = Math.min(out[i].fade, 0.5 * (out[i].end - out[i].start));
   return out;
 }
 
@@ -281,19 +289,20 @@ function changeWidth(score: Float32Array, blockSeconds: number, at: number, beat
  * designs cross with an equal-power curve (cos / sin), as sound engineers cross-fade two tracks, so the
  * picture never dips in the middle. `blend` is 0 away from boundaries and 1 at the middle of a change.
  */
-export function designsAt(sections: Section[], time: number): { shown: { design: Design; weight: number }[]; blend: number } {
-  if (!sections.length) return { shown: [{ design: 'ribbons', weight: 1 }], blend: 0 };
+export function designsAt(sections: Section[], time: number): { shown: { design: Design; weight: number }[]; blend: number; progress: number } {
+  if (!sections.length) return { shown: [{ design: 'ribbons', weight: 1 }], blend: 0, progress: -1 };
   let k = sections.findIndex((s) => time < s.end);
   if (k < 0) k = sections.length - 1;
-  const cross = (from: Design, to: Design, start: number, fade: number) => {
-    const w = Math.min(1, Math.max(0, (time - (start - fade / 2)) / fade));
+  const s = sections[k], prev = sections[k - 1];
+  // A change starts on the musical event itself (never before it: the picture follows the sound) and
+  // takes as long as the change in the music does.
+  if (prev && time >= s.start && time < s.start + s.fade) {
+    const w = Math.min(1, Math.max(0, (time - s.start) / s.fade));
     return {
-      shown: [{ design: from, weight: Math.cos((w * Math.PI) / 2) }, { design: to, weight: Math.sin((w * Math.PI) / 2) }],
+      shown: [{ design: prev.design, weight: Math.cos((w * Math.PI) / 2) }, { design: s.design, weight: Math.sin((w * Math.PI) / 2) }],
       blend: Math.sin(w * Math.PI),
+      progress: w,
     };
-  };
-  const s = sections[k], next = sections[k + 1], prev = sections[k - 1];
-  if (next && time > s.end - next.fade / 2) return cross(s.design, next.design, next.start, next.fade);
-  if (prev && time < s.start + s.fade / 2) return cross(prev.design, s.design, s.start, s.fade);
-  return { shown: [{ design: s.design, weight: 1 }], blend: 0 };
+  }
+  return { shown: [{ design: s.design, weight: 1 }], blend: 0, progress: -1 };
 }
