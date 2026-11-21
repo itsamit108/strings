@@ -311,9 +311,9 @@ export default function Studio() {
     if (!r || !songRef.current) return;
     const box = c.getBoundingClientRect();
     const x = (e.clientX - box.left) / box.width, y = (e.clientY - box.top) / box.height;
-    const b = r.captionBox;
-    const pad = 0.02;
-    const over = r.captionAlpha > 0.25 && x > b.x0 - pad && x < b.x1 + pad && y > b.y0 - pad && y < b.y1 + pad;
+    const pad = 0.015;
+    const inside = (b: { x0: number; x1: number; y0: number; y1: number }) => x > b.x0 - pad && x < b.x1 + pad && y > b.y0 - pad && y < b.y1 + pad;
+    const over = (r.captionAlpha > 0.25 && inside(r.captionBox)) || (r.labelAlpha > 0.25 && inside(r.labelBox));
     c.style.cursor = over ? 'text' : '';
     if (over && click) openInfo();
   };

@@ -90,6 +90,7 @@ export class PlateRenderer {
   private prog!: Record<'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'figure' | 'fade' | 'present', Program>;
   private besselTex!: WebGLTexture;
   private captionTex!: WebGLTexture;
+  private labelTex!: WebGLTexture;
   private vao!: WebGLVertexArrayObject;
   private histTex!: WebGLTexture;
   private shapeTex!: WebGLTexture;
@@ -110,7 +111,11 @@ export class PlateRenderer {
   /** where the caption sits (fractions of the picture) and how visible it is now, so it can be clicked to edit */
   captionBox = { x0: 0, y0: 0, x1: 0, y1: 0 };
   captionAlpha = 0;
+  /** the small label that stays for the whole song */
+  labelBox = { x0: 0, y0: 0, x1: 0, y1: 0 };
+  labelAlpha = 0;
   private captionCanvas: HTMLCanvasElement | null = null;
+  private labelCanvas: HTMLCanvasElement | null = null;
   /** vertical shift of the picture's centre, as a fraction of the height (+ = up) */
   centerOffset = 0;
   /** keep the ribbons together in a narrow band (used behind the first screen's text) */
@@ -242,10 +247,12 @@ export class PlateRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.besselTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, BESSEL_W, 9, 0, gl.RED, gl.FLOAT, BESSEL);
     smooth(gl.CLAMP_TO_EDGE);
-    this.captionTex = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, this.captionTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
-    smooth(gl.CLAMP_TO_EDGE);
+    for (const key of ['captionTex', 'labelTex'] as const) {
+      this[key] = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, this[key]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+      smooth(gl.CLAMP_TO_EDGE);
+    }
 
     this.resize(this.askedW, this.askedH, true);
   }
@@ -336,56 +343,73 @@ export class PlateRenderer {
     this.drawCaption();
   }
 
+  /**
+   * Two pictures of the title and artist: a large one that rises in at the start, and a small label that
+   * stays for the rest of the song. In 9:16 the label sits above the area Reels and Shorts cover with
+   * their own buttons and text.
+   */
   private drawCaption() {
     if (this.lost || typeof document === 'undefined') return;
     const W = this.width, H = this.height, gl = this.gl;
     const { title, artist, show } = this.caption;
-    const c = this.captionCanvas ?? (this.captionCanvas = document.createElement('canvas'));
-    c.width = W; c.height = H;
-    const g = c.getContext('2d')!;
-    g.clearRect(0, 0, W, H);
-    this.captionBox = { x0: 0, y0: 0, x1: 0, y1: 0 };
-    if (show && (title || artist)) {
-      const unit = Math.min(W, H), tall = H > W;
-      const maxW = W * (tall ? 0.84 : 0.62);
-      const fit = (font: (px: number) => string, text: string, px: number) => {
-        let size = px;
-        g.font = font(size);
-        while (size > 8 && g.measureText(text).width > maxW) { size *= 0.94; g.font = font(size); }
-        return size;
-      };
-      const titleFont = (px: number) => `300 ${px}px "Fraunces Variable", "Iowan Old Style", Georgia, serif`;
-      const artistFont = (px: number) => `450 ${px}px "Instrument Sans Variable", system-ui, "Segoe UI", sans-serif`;
-      const tSize = title ? fit(titleFont, title, unit * (tall ? 0.08 : 0.064)) : 0;
-      const aSize = artist ? fit(artistFont, artist, unit * (tall ? 0.034 : 0.03)) : 0;
-      const x = tall ? W / 2 : W * 0.07;
-      const base = H * (tall ? 0.74 : 0.72);
-      g.textAlign = tall ? 'center' : 'left';
-      g.textBaseline = 'alphabetic';
-      g.shadowColor = 'rgba(0,0,0,0.6)';
-      g.shadowBlur = unit * 0.02;
-      if (title) {
+    const unit = Math.min(W, H), tall = H > W;
+    const titleFont = (px: number) => `300 ${px}px "Fraunces Variable", "Iowan Old Style", Georgia, serif`;
+    const artistFont = (px: number) => `450 ${px}px "Instrument Sans Variable", system-ui, "Segoe UI", sans-serif`;
+    const draw = (
+      canvas: HTMLCanvasElement, tex: WebGLTexture,
+      o: { x: number; base: number; tPx: number; aPx: number; maxW: number; align: CanvasTextAlign; shadow: number },
+    ) => {
+      canvas.width = W; canvas.height = H;
+      const g = canvas.getContext('2d')!;
+      g.clearRect(0, 0, W, H);
+      let box = { x0: 0, y0: 0, x1: 0, y1: 0 };
+      if (show && (title || artist)) {
+        const fit = (font: (px: number) => string, text: string, px: number) => {
+          let size = px;
+          g.font = font(size);
+          while (size > 8 && g.measureText(text).width > o.maxW) { size *= 0.94; g.font = font(size); }
+          return size;
+        };
+        const tSize = title ? fit(titleFont, title, o.tPx) : 0;
+        const aSize = artist ? fit(artistFont, artist, o.aPx) : 0;
+        g.textAlign = o.align;
+        g.textBaseline = 'alphabetic';
+        g.shadowColor = 'rgba(0,0,0,0.6)';
+        g.shadowBlur = o.shadow;
+        if (title) {
+          g.font = titleFont(tSize);
+          g.fillStyle = 'rgba(244,239,229,0.96)';
+          g.fillText(title, o.x, o.base);
+        }
+        const aBase = o.base + (title ? tSize * 0.3 : 0) + aSize * 1.35;
+        if (artist) {
+          g.font = artistFont(aSize);
+          g.fillStyle = 'rgba(214,208,196,0.88)';
+          g.fillText(artist, o.x, aBase);
+        }
         g.font = titleFont(tSize);
-        g.fillStyle = 'rgba(244,239,229,0.96)';
-        g.fillText(title, x, base);
-      }
-      const aBase = base + (title ? tSize * 0.3 : 0) + aSize * 1.35;
-      if (artist) {
+        const wT = title ? g.measureText(title).width : 0;
         g.font = artistFont(aSize);
-        g.fillStyle = 'rgba(214,208,196,0.85)';
-        g.fillText(artist, x, aBase);
+        const wA = artist ? g.measureText(artist).width : 0;
+        const w = Math.max(wT, wA), x0 = o.align === 'center' ? o.x - w / 2 : o.x;
+        const top = o.base - tSize, bottom = artist ? aBase + aSize * 0.4 : o.base + tSize * 0.3;
+        box = { x0: x0 / W, x1: (x0 + w) / W, y0: top / H, y1: bottom / H };
       }
-      g.font = titleFont(tSize);
-      const wT = title ? g.measureText(title).width : 0;
-      g.font = artistFont(aSize);
-      const wA = artist ? g.measureText(artist).width : 0;
-      const w = Math.max(wT, wA), x0 = tall ? x - w / 2 : x;
-      const top = base - tSize, bottom = artist ? aBase + aSize * 0.4 : base + tSize * 0.3;
-      this.captionBox = { x0: x0 / W, x1: (x0 + w) / W, y0: top / H, y1: bottom / H };
-    }
-    gl.activeTexture(gl.TEXTURE3);
-    gl.bindTexture(gl.TEXTURE_2D, this.captionTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+      return box;
+    };
+    this.captionBox = draw(this.captionCanvas ?? (this.captionCanvas = document.createElement('canvas')), this.captionTex, {
+      x: tall ? W / 2 : W * 0.07, base: H * (tall ? 0.74 : 0.72),
+      tPx: unit * (tall ? 0.08 : 0.064), aPx: unit * (tall ? 0.034 : 0.03),
+      maxW: W * (tall ? 0.84 : 0.62), align: tall ? 'center' : 'left', shadow: unit * 0.02,
+    });
+    this.labelBox = draw(this.labelCanvas ?? (this.labelCanvas = document.createElement('canvas')), this.labelTex, {
+      x: tall ? W / 2 : W * 0.045, base: H * (tall ? 0.075 : 0.77),
+      tPx: unit * (tall ? 0.042 : 0.034), aPx: unit * (tall ? 0.024 : 0.021),
+      maxW: W * (tall ? 0.8 : 0.24), align: tall ? 'center' : 'left', shadow: unit * 0.012,
+    });
   }
 
   private motionAt(time: number): number {
@@ -527,7 +551,7 @@ export class PlateRenderer {
 
     // ---- the sky moves with the music --------------------------------------
     const tempo = a ? a.bpm / 120 : 0.5;
-    const flowSpeed = (0.008 + 0.03 * this.energy) * tempo;
+    const flowSpeed = (0.006 + 0.022 * this.energy) * tempo;
     this.skyFlow[0] += flowSpeed * dt * (0.8 + 0.4 * Math.sin(0.05 * time));
     this.skyFlow[1] += flowSpeed * dt * 0.35;
     this.skyRot += 0.0045 * tempo * (0.6 + 0.8 * this.energy) * dt;
@@ -605,8 +629,16 @@ export class PlateRenderer {
     }
     gl.uniform4fv(pr.u.uHits, hits);
     gl.uniform1f(pr.u.uWaveSpeed, unit * 0.45);
-    // Caption: rises and fades in over the first seconds, then fades away.
-    const capA = a && this.caption.show ? smooth01(0.3, 1.5, time) * (1 - smooth01(6.5, 8, time)) : 0;
+    // Title and artist: large, rising in over the first seconds; then a small label for the rest of the song,
+    // a little brighter when the music is louder.
+    const on = a && this.caption.show;
+    const capA = on ? smooth01(0.3, 1.5, time) * (1 - smooth01(5.5, 7, time)) : 0;
+    const labA = on ? smooth01(6.2, 7.8, time) * (0.62 + 0.3 * this.energy + 0.08 * this.kick) : 0;
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, this.labelTex);
+    gl.uniform1i(pr.u.uLabel, 5);
+    gl.uniform1f(pr.u.uLabelAlpha, labA);
+    this.labelAlpha = labA;
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.captionTex);
     gl.uniform1i(pr.u.uCaption, 3);
@@ -629,7 +661,7 @@ export class PlateRenderer {
       gl.uniform1i(p.u.uHist, 1);
       gl.uniform2f(p.u.uRes, W, H);
       const tall = H > W && !this.compact;
-      const gap = tall ? 0.2 : this.compact ? 0.03 : 0.125;
+      const gap = tall ? 0.185 : this.compact ? 0.03 : 0.125;
       const centres = new Float32Array(S.RIBBONS), cycles = new Float32Array(S.RIBBONS), phase = new Float32Array(S.RIBBONS);
       const colA = new Float32Array(S.RIBBONS * 3), colB = new Float32Array(S.RIBBONS * 3);
       const motion = this.motionAt(c.time);

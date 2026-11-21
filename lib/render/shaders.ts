@@ -139,6 +139,8 @@ uniform float uWaveSpeed;   // pixels per second a hit's wave front travels
 uniform sampler2D uCaption;
 uniform float uCaptionAlpha;
 uniform float uCaptionLift;
+uniform sampler2D uLabel;
+uniform float uLabelAlpha;
 out vec4 o;
 float hash12(vec2 p) {
   vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -183,6 +185,21 @@ float hitWave(vec2 px) {
   }
   return sum;
 }
+// Sound is a longitudinal wave: particles are pushed along its direction and back as a front passes.
+// Each hit's front moves outward from the centre; this is how far it has moved a particle there.
+vec2 hitPush(vec2 px) {
+  vec2 c = 0.5 / uInvRes;
+  vec2 d = px - c;
+  float r = length(d);
+  float push = 0.0;
+  for (int i = 0; i < 6; i++) {
+    float age = uHits[i].x, str = uHits[i].y;
+    if (str <= 0.0) continue;
+    float x = (r - age * uWaveSpeed) / (0.06 * uUnit);
+    push += str * sin(x * 2.4) * exp(-x * x) * exp(-age / 2.2);
+  }
+  return r > 1e-3 ? d / r * push * 0.025 * uUnit : vec2(0.0);
+}
 vec2 turn(vec2 px, float a) {
   vec2 c = 0.5 / uInvRes;
   float s = sin(a), co = cos(a);
@@ -216,7 +233,11 @@ vec3 sky(vec2 px) {
   float tint = fbm(q * 1.3 - uSeed * 0.21 - drift);
   vec3 neb = mix(uNebA, uNebB, smoothstep(0.3, 0.7, tint)) * smoothstep(0.42, 0.85, cloud) * band * uNebula * (1.0 + 1.5 * hitWave(px));
   // Two depths of stars turning at different rates (near ones faster), so the sky has depth.
-  vec3 s = stars(turn(px, uRot), uUnit / 14.0, uStarDensity, 0.9, band) + stars(turn(px, uRot * 0.55) + 911.0, uUnit / 34.0, uStarDensity * 0.8, 0.45, band);
+  // Particles drift with the music (faster when louder; near ones faster than far ones) and are pushed by hits.
+  vec2 p = px - hitPush(px);
+  vec2 flow = vec2(uFlow.x, uFlow.y) * uUnit;
+  vec3 s = stars(turn(p, uRot) - flow * 1.6, uUnit / 14.0, uStarDensity, 0.9, band)
+         + stars(turn(p, uRot * 0.55) - flow * 0.7 + 911.0, uUnit / 34.0, uStarDensity * 0.8, 0.45, band);
   return neb + s;
 }
 void main() {
@@ -243,6 +264,10 @@ void main() {
   if (uCaptionAlpha > 0.001) {
     vec4 cap = texture(uCaption, vec2(uv.x, 1.0 - uv.y + uCaptionLift));
     col = mix(col, cap.rgb, cap.a * uCaptionAlpha);
+  }
+  if (uLabelAlpha > 0.001) {
+    vec4 lab = texture(uLabel, vec2(uv.x, 1.0 - uv.y));
+    col = mix(col, lab.rgb, lab.a * uLabelAlpha);
   }
   o = vec4(col, 1.0);
 }`;
