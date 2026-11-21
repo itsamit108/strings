@@ -1,4 +1,4 @@
-# Nodal: music as waves of light
+# Strings: music as waves of light
 
 Open a song or a video and watch the sound move as waves of coloured light. Keep it as an MP4
 video with the sound in it, exactly as long as the song. Two designs: Ribbons and Rings.

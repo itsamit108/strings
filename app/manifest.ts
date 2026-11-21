@@ -2,8 +2,8 @@ import type { MetadataRoute } from 'next';
 
 export default function manifest(): MetadataRoute.Manifest {
   const base: MetadataRoute.Manifest = {
-    name: 'Nodal: music as waves of light',
-    short_name: 'Nodal',
+    name: 'Strings: music as waves of light',
+    short_name: 'Strings',
     description: 'Watch your song move as waves of light. Keep it as a video.',
     start_url: '/',
     scope: '/',

@@ -237,7 +237,7 @@ export default function Studio() {
     setCanFullscreen(!!document.fullscreenEnabled);
     setShape(window.innerHeight > window.innerWidth ? 'portrait' : 'landscape');
     if (window.matchMedia('(pointer: coarse)').matches) setFps(30);
-    // Installed app: files opened "with Nodal" arrive here.
+    // Installed app: files opened "with Strings" arrive here.
     const lq = (window as unknown as { launchQueue?: { setConsumer: (fn: (p: { files: FileSystemFileHandle[] }) => void) => void } }).launchQueue;
     lq?.setConsumer(async (params) => {
       const handle = params.files?.[0];
@@ -257,7 +257,7 @@ export default function Studio() {
 
   useEffect(() => {
     if (!song || !('mediaSession' in navigator)) return;
-    navigator.mediaSession.metadata = new MediaMetadata({ title: song.title, artist: 'Nodal' });
+    navigator.mediaSession.metadata = new MediaMetadata({ title: song.title, artist: 'Strings' });
     navigator.mediaSession.setActionHandler('play', () => void player.current?.play());
     navigator.mediaSession.setActionHandler('pause', () => player.current?.pause());
   }, [song]);
@@ -342,7 +342,7 @@ export default function Studio() {
     const long = even((size * 16) / 9);
     const width = shape === 'landscape' ? long : size;
     const height = shape === 'portrait' ? long : size;
-    const base = s.title.replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'nodal';
+    const base = s.title.replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'strings';
     const controller = new AbortController();
     abort.current = controller;
     const finish = (blob: Blob | null, name: string) => {
@@ -353,7 +353,7 @@ export default function Studio() {
     const record = async () => {
       setExp({ stage: 'running', live: true });
       const blob = await exportRealtime({ canvas, player: p, fps, signal: controller.signal, onProgress: setExpProgress });
-      finish(blob, `${base} (Nodal).${blob.type.includes('mp4') ? 'mp4' : 'webm'}`);
+      finish(blob, `${base} (Strings).${blob.type.includes('mp4') ? 'mp4' : 'webm'}`);
     };
     try {
       if (!offlineExportAvailable()) {
@@ -361,7 +361,7 @@ export default function Studio() {
         await record();
         return;
       }
-      const name = `${base} (Nodal).mp4`;
+      const name = `${base} (Strings).mp4`;
       let fileStream: FileSystemWritableFileStream | undefined;
       type Picker = (o: { suggestedName?: string; types?: { description: string; accept: Record<string, string[]> }[] }) => Promise<FileSystemFileHandle>;
       const picker = (window as unknown as { showSaveFilePicker?: Picker }).showSaveFilePicker;
@@ -437,7 +437,7 @@ export default function Studio() {
 
       {phase === 'idle' && (
         <main className="intro">
-          <h1>Nodal</h1>
+          <h1>Strings</h1>
           <p>
             Give it a song. Watch the sound itself move as waves of light, and keep it as a video.
           </p>
@@ -459,7 +459,7 @@ export default function Studio() {
       {ready && (
         <>
           <header className="top chrome">
-            <span className="mark">Nodal</span>
+            <span className="mark">Strings</span>
             <nav className="tools">
               <button onClick={openExport}>Export video</button>
               <span className="designs" role="group" aria-label="Design">

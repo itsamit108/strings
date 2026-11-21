@@ -1,5 +1,5 @@
-/* Nodal service worker: keeps the app usable without a network. */
-const CACHE = 'nodal-v1';
+/* Strings service worker: keeps the app usable without a network. */
+const CACHE = 'strings-v1';
 const SHELL = ['/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
