@@ -97,7 +97,8 @@ export class Player {
 
   pause() {
     if (!this.playing) return;
-    this.offset = Math.min(this.duration, this.offset + this.ctx.currentTime - this.startedAt);
+    // Stop where the listener is (what has reached the speakers), so the picture does not jump.
+    this.offset = this.time;
     this.stopSource();
     this.playing = false;
     this.onState?.();

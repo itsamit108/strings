@@ -43,6 +43,8 @@ export interface Analysis extends AnalysisParams {
   bands: Float32Array;
   bpm: number;
   beatPeriod: number;
+  /** how strongly the onsets repeat at the tempo, 0..1 (low: no steady beat, so the tempo is not shown) */
+  tempoStrength: number;
   key: KeyEstimate;
   /** 16 hex characters derived from the song's measured features */
   fingerprint: string;

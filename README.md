@@ -88,6 +88,11 @@ the picture over the first seconds and fade by eight seconds, in the exported vi
   average. Tempo: autocorrelation of the onset curve. Key: Krumhansl–Kessler profiles.
 - Pitch ranges: band power with a +3 dB per octave tilt, each range scaled to its own loudest
   moments in the song, with level-meter smoothing (quick to rise, slow to fall).
+- Key and tempo are shown only when measured clearly (key profile match ≥ 0.6; onsets repeating at the
+  tempo with ≥ 0.2 of their variance). Silence, noise or a lone tone show "no clear key" / "no steady beat".
+- Moving frequencies are shown eight octaves down (÷256): ripple-tank waves at the notes' own
+  frequencies, drum-skin modes at j_n1/j_01 times the key note (÷512); a hit's wave reaches the picture's
+  edge in one bar.
 - The same file always gives the same video.
 
 ### Honest simplifications

@@ -115,9 +115,10 @@ function audioTrack(v: DataView, moov: Box): TrackInfo | null {
     // First sample entry: 8 bytes of stsd header, then the entry box.
     const entry = boxes(v, stsd.body + 8, stsd.end).next().value as Box | undefined;
     if (!entry) continue;
-    const channels = v.getUint16(entry.body + 16);
-    const sampleRate = v.getUint32(entry.body + 24) >>> 16;
     const version = v.getUint16(entry.body + 8);
+    // QuickTime sound description v2 keeps placeholders in the old fields; the real values come later.
+    const channels = version === 2 ? v.getUint32(entry.body + 40) : v.getUint16(entry.body + 16);
+    const sampleRate = version === 2 ? Math.round(v.getFloat64(entry.body + 32)) : v.getUint32(entry.body + 24) >>> 16;
     // QuickTime sound description v1/v2 carry extra fields before the child boxes.
     const kids = entry.body + 28 + (version === 1 ? 16 : version === 2 ? 36 : 0);
     if (entry.type === 'mp4a') {
@@ -181,13 +182,14 @@ function fragmentFrames(v: DataView, bytes: Uint8Array, trackId: number, moov: B
   const frames: Uint8Array[] = [];
   for (const moof of top) {
     if (moof.type !== 'moof') continue;
+    let prevEnd = -1; // where the previous track fragment's data ended (the base when nothing else is given)
     for (const traf of boxes(v, moof.body, moof.end)) {
       if (traf.type !== 'traf') continue;
       const tfhd = child(v, traf, 'tfhd');
       if (!tfhd || v.getUint32(tfhd.body + 4) !== trackId) continue;
       const tf = v.getUint32(tfhd.body) & 0xffffff;
       let p = tfhd.body + 8;
-      let base = moof.start; // default-base-is-moof, and the usual case without a base offset
+      let base = tf & 0x20000 || prevEnd < 0 ? moof.start : prevEnd;
       if (tf & 0x1) { base = Number(v.getBigUint64(p)); p += 8; }
       if (tf & 0x2) p += 4;
       if (tf & 0x8) p += 4;
@@ -214,6 +216,7 @@ function fragmentFrames(v: DataView, bytes: Uint8Array, trackId: number, moov: B
         }
         next = o;
       }
+      prevEnd = next;
     }
   }
   return frames;

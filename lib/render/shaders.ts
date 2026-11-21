@@ -391,7 +391,7 @@ void main() {
   vec2 p = (gl_FragCoord.xy - uCenterPx) / uRadius;
   float r = length(p);
   if (r > 1.25) { o = vec4(0.0); return; }
-  float th = atan(p.y, p.x);
+  float th = r > 1e-4 ? atan(p.y, p.x) : 0.0; // atan(0, 0) is undefined
   float w = 0.0;
   for (int n = 0; n < 9; n++) {
     float J = texture(uBessel, vec2(min(r, 1.0), (float(n) + 0.5) / 9.0)).r;

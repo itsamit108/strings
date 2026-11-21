@@ -68,9 +68,13 @@ export default function Studio() {
   const player = useRef<Player | null>(null);
   const songRef = useRef<Song | null>(null);
   const offline = useRef(false);
+  /** true while the fallback recorder holds the canvas at the export size */
+  const holdSize = useRef(false);
   const abort = useRef<AbortController | null>(null);
   const fit = useRef<() => void>(() => {});
   const lastSeek = useRef(0);
+  /** counts loads, so a slow earlier file never replaces a later one */
+  const loadId = useRef(0);
   const phaseRef = useRef<Phase>('idle');
   const designRef = useRef<HTMLElement>(null);
   const infoDialog = useRef<HTMLDialogElement>(null);
@@ -140,7 +144,7 @@ export default function Studio() {
     if (forced && DESIGNS.includes(forced)) r.force = forced;
 
     fit.current = () => {
-      if (offline.current) return;
+      if (offline.current || holdSize.current) return;
       const dpr = window.devicePixelRatio || 1;
       // The canvas fills the stage, or a 9:16 frame inside it.
       let w = (canvas.clientWidth || stage.clientWidth) * dpr, h = (canvas.clientHeight || stage.clientHeight) * dpr;
@@ -193,7 +197,10 @@ export default function Studio() {
         if (playedRef.current) playedRef.current.style.clipPath = `inset(0 ${100 - f}% 0 0)`;
         if (headRef.current) headRef.current.style.left = `${f}%`;
         if (nowRef.current) nowRef.current.textContent = clock(t);
-        if (sliderRef.current) sliderRef.current.setAttribute('aria-valuenow', String(Math.round(t)));
+        if (sliderRef.current) {
+          sliderRef.current.setAttribute('aria-valuenow', String(Math.round(t)));
+          sliderRef.current.setAttribute('aria-valuetext', `${clock(t)} of ${clock(d)}`);
+        }
         const name = DESIGN_NAMES[r.current];
         if (designRef.current && designRef.current.textContent !== name) designRef.current.textContent = name;
       }
@@ -210,10 +217,11 @@ export default function Studio() {
   useEffect(() => () => { player.current?.dispose(); player.current = null; }, []);
 
   // ---- loading a song -----------------------------------------------------
-  const adoptBuffer = useCallback(async (audio: AudioBuffer, title: string, artist: string) => {
+  const adoptBuffer = useCallback(async (audio: AudioBuffer, title: string, artist: string, id: number) => {
     setStatus('Measuring the sound');
     setProgress(0);
     const analysis = await analyzeAudio(audio, setProgress);
+    if (id !== loadId.current) return; // a newer file was opened meanwhile
     const s: Song = { title, artist, showCaption: true, analysis, audio };
     songRef.current = s;
     renderer.current?.setSong(analysis);
@@ -240,6 +248,7 @@ export default function Studio() {
   }, []);
 
   const openFile = useCallback(async (file: File) => {
+    const id = ++loadId.current;
     const p = getPlayer();
     void p.ctx.resume();
     p.pause();
@@ -252,18 +261,20 @@ export default function Studio() {
     try {
       audio = await p.decode(await file.arrayBuffer());
     } catch (e) {
-      fail(noSound(file.name, e));
+      if (id === loadId.current) fail(noSound(file.name, e));
       return;
     }
+    if (id !== loadId.current) return;
     try {
       const { title, artist } = await info;
-      await adoptBuffer(audio, title, artist);
+      await adoptBuffer(audio, title, artist, id);
     } catch (e) {
-      fail(`The sound could not be measured: ${(e as Error).message}`);
+      if (id === loadId.current) fail(`The sound could not be measured: ${(e as Error).message}`);
     }
   }, [fail, getPlayer, adoptBuffer]);
 
   const playDemo = useCallback(async () => {
+    const id = ++loadId.current;
     const p = getPlayer();
     void p.ctx.resume();
     p.pause();
@@ -276,9 +287,9 @@ export default function Studio() {
       const audio = p.ctx.createBuffer(2, left.length, 44100);
       audio.getChannelData(0).set(left);
       audio.getChannelData(1).set(right);
-      await adoptBuffer(audio, DEMO_TITLE, 'Strings');
+      await adoptBuffer(audio, DEMO_TITLE, 'Strings', id);
     } catch (e) {
-      fail(`The demo could not start: ${(e as Error).message}`);
+      if (id === loadId.current) fail(`The demo could not start: ${(e as Error).message}`);
     }
   }, [fail, getPlayer, adoptBuffer]);
 
@@ -427,8 +438,27 @@ export default function Studio() {
     };
     const record = async () => {
       setExp({ stage: 'running', live: true });
-      const blob = await exportRealtime({ canvas, player: p, fps, signal: controller.signal, onProgress: setExpProgress });
-      finish(blob, `${base} (Strings).${blob.type.includes('mp4') ? 'mp4' : 'webm'}`);
+      // Record at the chosen size and shape, at full resolution, from the song's own starting state.
+      holdSize.current = true;
+      const keep = { offset: r.centerOffset, compact: r.compact };
+      r.governorPaused = true;
+      r.centerOffset = 0;
+      r.compact = false;
+      r.resize(width, height, true);
+      r.setSafeTop(0);
+      r.seed(s.analysis.seed);
+      canvas.classList.add('exporting');
+      try {
+        const blob = await exportRealtime({ canvas, player: p, fps, signal: controller.signal, onProgress: setExpProgress });
+        finish(blob, `${base} (Strings).${blob.type.includes('mp4') ? 'mp4' : 'webm'}`);
+      } finally {
+        holdSize.current = false;
+        r.governorPaused = false;
+        r.centerOffset = keep.offset;
+        r.compact = keep.compact;
+        canvas.classList.remove('exporting');
+        fit.current();
+      }
     };
     try {
       if (!offlineExportAvailable()) {
@@ -463,6 +493,7 @@ export default function Studio() {
         finish(blob, name);
       } catch (e) {
         if (!(e instanceof ExportUnsupportedError)) throw e;
+        await fileStream?.abort().catch(() => {});
         offline.current = false;
         canvas.classList.remove('exporting');
         fit.current();
@@ -574,8 +605,9 @@ export default function Studio() {
                 <button className="edit" onClick={openInfo} aria-label="Change the title and artist">Edit</button>
               </div>
               <dl>
-                <div><dt>Key</dt><dd>{a.key.name}</dd></div>
-                <div><dt>Tempo</dt><dd>{Math.round(a.bpm)} BPM</dd></div>
+                {/* Shown only when measured clearly: silence, noise or a lone tone have no key or steady beat. */}
+                <div><dt>Key</dt><dd>{a.key.confidence >= 0.6 ? a.key.name : 'no clear key'}</dd></div>
+                <div><dt>Tempo</dt><dd>{a.tempoStrength >= 0.2 ? `${Math.round(a.bpm)} BPM` : 'no steady beat'}</dd></div>
                 <div><dt>Now</dt><dd ref={designRef} className="design">{DESIGN_NAMES[renderer.current?.current ?? 'ribbons']}</dd></div>
                 <div><dt>Figure</dt><dd>{a.fingerprint.slice(0, 4)} {a.fingerprint.slice(4, 8)}</dd></div>
               </dl>
@@ -596,6 +628,7 @@ export default function Studio() {
                 aria-valuemin={0}
                 aria-valuemax={Math.round(a.duration)}
                 aria-valuenow={0}
+                aria-valuetext="0:00"
                 onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); scrub(e, true); }}
                 onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) scrub(e); }}
                 onPointerUp={(e) => scrub(e, true)}
@@ -603,6 +636,8 @@ export default function Studio() {
                   const t = player.current?.time ?? 0;
                   if (e.key === 'ArrowRight') seekTo(t + 5);
                   else if (e.key === 'ArrowLeft') seekTo(t - 5);
+                  else if (e.key === 'Home') { e.preventDefault(); seekTo(0); }
+                  else if (e.key === 'End') { e.preventDefault(); seekTo(Math.max(0, (player.current?.duration ?? 0) - 1)); }
                   else if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); }
                 }}
               >
@@ -653,11 +688,20 @@ export default function Studio() {
         </form>
       </dialog>
 
-      <dialog ref={exportDialog} onClose={() => { abort.current?.abort(); setExp(null); }}>
+      <dialog
+        ref={exportDialog}
+        onClose={() => {
+          abort.current?.abort();
+          setExp((prev) => {
+            if (prev?.stage === 'done' && prev.url) URL.revokeObjectURL(prev.url);
+            return null;
+          });
+        }}
+      >
         {exp?.stage === 'options' && (
           <form method="dialog" onSubmit={(e) => { e.preventDefault(); void startExport(); }}>
             <h3>Export video</h3>
-            <p>The whole song is drawn again from the start and saved as an MP4 video with its sound, exactly as long as the song. It uses the design you are watching.</p>
+            <p>The whole song is drawn again from the start and saved as an MP4 video with its sound, exactly as long as the song. The pictures change with the song's sections, as when you watch it.</p>
             <label>Shape
               <select value={shape} onChange={(e) => setShape(e.target.value as Shape)}>
                 <option value="landscape">Wide 16:9, YouTube and screens</option>

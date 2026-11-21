@@ -66,6 +66,8 @@ function plateMode(rel: number): [number, number] {
 /** Simplest whole-number ratio for each interval in semitones (just intonation), upper : lower. */
 const JUST: [number, number][] = [[1, 1], [16, 15], [9, 8], [6, 5], [5, 4], [4, 3], [45, 32], [3, 2], [8, 5], [5, 3], [9, 5], [15, 8]];
 const FIGURE_POINTS = 14000;
+/** Real frequencies are far too fast to see; moving ones are shown eight octaves down (÷256). */
+const SLOW = 256;
 /** Shown with the title and artist, in the picture and the video. */
 const CREDIT_URL = 'strings-coral.vercel.app';
 
@@ -122,6 +124,7 @@ export class PlateRenderer {
   labelAlpha = 0;
   private captionCanvas: HTMLCanvasElement | null = null;
   private labelCanvas: HTMLCanvasElement | null = null;
+  private captionKey = '';
   /** vertical shift of the picture's centre, as a fraction of the height (+ = up) */
   centerOffset = 0;
   /** keep the ribbons together in a narrow band (used behind the first screen's text) */
@@ -177,11 +180,15 @@ export class PlateRenderer {
   private figurePhase = 0;
   private ripplePhase = new Float32Array(2);
   private membraneTurn = new Float32Array(9);
+  /** each drum-skin mode's oscillation phase */
+  private membranePhase = new Float32Array(9);
   /** whole-song measurements for the sky */
   private songBright = 0.5;
   private songBusy = 0.05;
   /** 0 away from a change of design, 1 in the middle of one */
   private blend = 0;
+  /** song time at the last frame, to tell playing on from a jump (seek, replay, export start) */
+  private lastTime = Number.NaN;
   /** share of the picture's height covered by controls at the top (0 when exporting) */
   private safeTop = 0;
   setSafeTop(v: number) {
@@ -210,7 +217,7 @@ export class PlateRenderer {
   }
 
   private onLost = (e: Event) => { e.preventDefault(); this.lost = true; };
-  private onRestored = () => { this.lost = false; this.accum = null; this.setup(); };
+  private onRestored = () => { this.lost = false; this.accum = null; this.captionKey = ''; this.setup(); };
 
   private setup() {
     const gl = this.canvas.getContext('webgl2', {
@@ -237,6 +244,8 @@ export class PlateRenderer {
       gl.linkProgram(p);
       if (!gl.getProgramParameter(p, gl.LINK_STATUS))
         throw new Error('Shader failed to link: ' + gl.getProgramInfoLog(p));
+      // The linked program keeps what it needs; the shader objects can go.
+      for (const sh of gl.getAttachedShaders(p) ?? []) { gl.detachShader(p, sh); gl.deleteShader(sh); }
       const u: Uniforms = {};
       const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS) as number;
       for (let i = 0; i < n; i++) {
@@ -285,6 +294,9 @@ export class PlateRenderer {
     for (let k = 0; k < S.RIBBONS; k++) this.seedPhase[k] = 2 * Math.PI * hash01((seed >>> 0) + k * 7919);
     this.chroma.fill(0);
     this.energy = this.kick = 0;
+    this.live = 0;
+    this.blend = 0;
+    this.lastTime = Number.NaN;
     this.brightness = 0.5;
     this.ribbonHue.fill(Number.NaN);
     this.plateW.fill(0);
@@ -300,6 +312,7 @@ export class PlateRenderer {
     this.skyRot = 0;
     this.ripplePhase.fill(0);
     for (let n = 0; n < 9; n++) this.membraneTurn[n] = 2 * Math.PI * hash01((seed >>> 0) + 101 * n);
+    this.membranePhase.fill(0);
     if (this.accum && !this.lost) {
       const gl = this.gl;
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.accum.fbo);
@@ -377,6 +390,10 @@ export class PlateRenderer {
     if (this.lost || typeof document === 'undefined') return;
     const W = this.width, H = this.height, gl = this.gl;
     const { title, artist, show } = this.caption;
+    // Redraw only when something it shows has changed (resizes and safe-area updates come often).
+    const key = `${W}x${H}|${title}|${artist}|${show}|${this.safeTop.toFixed(3)}`;
+    if (key === this.captionKey) return;
+    this.captionKey = key;
     const unit = Math.min(W, H), tall = H > W;
     const titleFont = (px: number) => `300 ${px}px "Fraunces Variable", "Iowan Old Style", Georgia, serif`;
     const artistFont = (px: number) => `450 ${px}px "Instrument Sans Variable", system-ui, "Segoe UI", sans-serif`;
@@ -601,6 +618,11 @@ export class PlateRenderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.blendFunc(gl.ONE, gl.ONE);
 
+    // A jump in time (seek, replay, pause/resume, export start) is not music: forget what was rising.
+    const jumped = !playing || Number.isNaN(this.lastTime) || Math.abs(time - this.lastTime - dt) > 0.25;
+    this.lastTime = time;
+    if (time < this.lastHit - 0.05) { this.lastHit = -1; this.hits.fill(0); }
+
     // ---- the sky moves with the music --------------------------------------
     const tempo = a ? a.bpm / 120 : 0.5;
     const flowSpeed = (0.006 + 0.022 * this.energy) * tempo;
@@ -623,6 +645,7 @@ export class PlateRenderer {
     // so bass is what makes the designs swell. A bass hit is a fast rise in the two lowest pitch ranges.
     const bassIn = s && a && playing ? (s.bands[0] + s.bands[1]) / 2 : 0;
     this.bassNow += (bassIn - this.bassNow) * ease(bassIn > this.bassNow ? 0.03 : 0.15);
+    if (jumped) this.prevBass = bassIn;
     const rise = (bassIn - this.prevBass) / dt;
     this.prevBass = bassIn;
     this.bassHit = Math.max(this.bassHit * Math.exp(-dt / 0.2), Math.min(1, Math.max(0, (rise - 1.2) / 5)));
@@ -630,6 +653,7 @@ export class PlateRenderer {
     // the lines glow brighter and a little wider, as a resonance does; a voice coming in blooms once.
     const voiceInNow = s && a && playing ? (s.bands[3] + s.bands[4] + s.bands[5]) / 3 : 0;
     this.voiceNow += (voiceInNow - this.voiceNow) * ease(voiceInNow > this.voiceNow ? 0.05 : 0.3);
+    if (jumped) this.prevVoice = voiceInNow;
     const vRise = (voiceInNow - this.prevVoice) / dt;
     this.prevVoice = voiceInNow;
     this.voiceIn = Math.max(this.voiceIn * Math.exp(-dt / 0.6), Math.min(1, Math.max(0, (vRise - 1.0) / 4)));
@@ -698,7 +722,8 @@ export class PlateRenderer {
       hits[i * 4 + 1] = ok ? this.hits[i * 2 + 1] : 0;
     }
     gl.uniform4fv(pr.u.uHits, hits);
-    gl.uniform1f(pr.u.uWaveSpeed, unit * 0.45);
+    // A hit's wave front reaches the edge of the picture in one bar (four beats).
+    gl.uniform1f(pr.u.uWaveSpeed, (0.5 * Math.hypot(W, H)) / (4 * (a?.beatPeriod ?? 0.6)));
     // Title and artist: large, rising in over the first seconds; then a small label for the rest of the song,
     // a little brighter when the music is louder.
     const on = a && this.caption.show;
@@ -836,9 +861,9 @@ export class PlateRenderer {
         // One medium, one speed: wavelength ∝ 1 / frequency.
         const base = 0.075 * unit, fRef = 261.6256 * Math.pow(2, c.tonic / 12);
         const kLo = (2 * Math.PI * (fLo / fRef)) / base, kHi = (2 * Math.PI * (fHi / fRef)) / base;
-        const speed = 0.9; // wave cycles per second at the key note, slowed to be seen
-        this.ripplePhase[0] += 2 * Math.PI * speed * (fLo / fRef) * c.dt;
-        this.ripplePhase[1] += 2 * Math.PI * speed * (fHi / fRef) * c.dt;
+        // The waves oscillate at the notes' own frequencies, eight octaves down (÷256) so the eye can follow.
+        this.ripplePhase[0] += 2 * Math.PI * (fLo / SLOW) * c.dt;
+        this.ripplePhase[1] += 2 * Math.PI * (fHi / SLOW) * c.dt;
         gl.uniform1fv(p.u.uK, [kLo, kHi]);
         gl.uniform1fv(p.u.uPhase, this.ripplePhase);
         const aLo = this.plateW[lo] + 0.2 * this.bassE + 0.6 * this.bassHit, aHi = (n2 === n1 ? this.plateW[lo] : this.plateW[hi]) + 0.1;
@@ -865,7 +890,11 @@ export class PlateRenderer {
       for (let n = 0; n < 9; n++) {
         amp[n] = (amp[n] / (0.6 + total)) * 1.1 * (n >= 4 && n <= 6 ? 1 + 0.8 * this.voiceNow : 1);
         // Each mode turns at a speed in proportion to its frequency (j_n1), alternating direction.
-        this.membraneTurn[n] += (n % 2 ? 1 : -1) * 0.05 * (BESSEL_ZEROS[n] / BESSEL_ZEROS[0]) * c.dt * (0.3 + this.energy);
+        // A drum skin's modes do not turn, they swing: each at its own frequency, j_n1 / j_01 times the
+        // fundamental. The fundamental is the key note, nine octaves down (÷512) so the eye can follow.
+        const f0 = (261.6256 * Math.pow(2, c.tonic / 12)) / (2 * SLOW);
+        this.membranePhase[n] += 2 * Math.PI * f0 * (BESSEL_ZEROS[n] / BESSEL_ZEROS[0]) * c.dt;
+        amp[n] *= Math.cos(this.membranePhase[n]);
       }
       gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
       gl.uniform1f(p.u.uRadius, 0.43 * unit * c.pulse);
@@ -891,6 +920,9 @@ export class PlateRenderer {
     if (this.accum) { gl.deleteTexture(this.accum.tex); gl.deleteFramebuffer(this.accum.fbo); }
     gl.deleteTexture(this.histTex);
     gl.deleteTexture(this.shapeTex);
+    gl.deleteTexture(this.besselTex);
+    gl.deleteTexture(this.captionTex);
+    gl.deleteTexture(this.labelTex);
     gl.deleteVertexArray(this.vao);
     for (const p of Object.values(this.prog)) gl.deleteProgram(p.p);
   }

@@ -73,10 +73,26 @@ const breathe = (): Promise<void> => {
   return s?.yield ? s.yield() : new Promise((r) => setTimeout(r, 0));
 };
 
+/**
+ * Surround sound (5.1, 7.1) folded down to stereo with the Web Audio speaker rules, which keep the
+ * centre channel (usually the voice) instead of dropping it. Mono and stereo pass through unchanged.
+ */
+async function stereo(audio: AudioBuffer): Promise<AudioBuffer> {
+  if (audio.numberOfChannels <= 2) return audio;
+  const ctx = new OfflineAudioContext(2, audio.length, audio.sampleRate);
+  const src = ctx.createBufferSource();
+  src.buffer = audio;
+  src.channelInterpretation = 'speakers';
+  src.connect(ctx.destination);
+  src.start();
+  return ctx.startRendering();
+}
+
 /** Returns the finished file, or null when it was written to `fileStream`. */
 export async function exportOffline(o: OfflineExportOptions): Promise<Blob | null> {
   if (!offlineExportAvailable()) throw new ExportUnsupportedError('WebCodecs is missing.');
-  const channels = Math.min(2, o.audio.numberOfChannels);
+  const source = await stereo(o.audio);
+  const channels = source.numberOfChannels;
   const sr = o.audio.sampleRate;
   const video = await pickVideo(o.width, o.height, o.fps);
   const audio = await pickAudio(sr, channels);
@@ -103,8 +119,8 @@ export async function exportOffline(o: OfflineExportOptions): Promise<Blob | nul
   });
   aenc.configure(audio.config);
 
-  const pcm = Array.from({ length: channels }, (_, c) => o.audio.getChannelData(c));
-  const length = o.audio.length;
+  const pcm = Array.from({ length: channels }, (_, c) => source.getChannelData(c));
+  const length = source.length;
   const block = Math.round(sr * 0.1);
   let fed = 0;
   const feedAudio = (until: number) => {

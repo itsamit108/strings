@@ -108,6 +108,9 @@ export function finalize(chunks: ChunkFeatures[], p: AnalysisParams, duration: n
     if (score > bestScore) { bestScore = score; bestLag = lag; }
   }
   let bpm = 100;
+  // How strongly the onsets repeat at that lag, against their own variance (1 = perfectly periodic).
+  const variance = onset.reduce((s, v) => s + (v - mean) ** 2, 0) / F;
+  const tempoStrength = bestLag > 0 && variance > 1e-12 ? Math.max(0, ac[bestLag] / variance) : 0;
   if (bestLag > 0 && bestScore > 0) {
     const y0 = ac[bestLag - 1], y1 = ac[bestLag], y2 = ac[bestLag + 1];
     const denom = y0 - 2 * y1 + y2;
@@ -189,7 +192,7 @@ export function finalize(chunks: ChunkFeatures[], p: AnalysisParams, duration: n
 
   return {
     ...p, duration, loud, onset, bright, chroma, bands,
-    bpm, beatPeriod: 60 / bpm, key: best,
+    bpm, beatPeriod: 60 / bpm, tempoStrength, key: best,
     fingerprint, seed: h1 ^ h2, arc, arcHue,
   };
 }

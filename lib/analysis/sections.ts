@@ -58,6 +58,7 @@ const HALF = 12;        // kernel half-width in blocks (6 s each side)
 const MIN_GAP = 16;     // at least 8 s between boundaries
 const MAX_LEN = 32;     // split sections longer than this (seconds)
 const MIN_PIECE = 10;   // never make a section shorter than this when splitting (seconds)
+const MAX_BLOCKS = 1600; // keeps the similarity matrix ≤ 10 MB
 
 /** Share of the energy in the voice range: pitch ranges 4–6 (about 315 Hz – 2.5 kHz), where voices carry. */
 function voiceShare(a: Analysis, i: number): number {
@@ -72,7 +73,9 @@ function voiceShare(a: Analysis, i: number): number {
 
 function blocks(a: Analysis) {
   const fps = a.sampleRate / a.hop;
-  const per = Math.max(1, Math.round(BLOCK * fps));
+  // Half-second blocks, but never more than MAX_BLOCKS of them: the similarity matrix is n², so a long
+  // recording (an hour would be 207 MB) is compared in longer blocks instead.
+  const per = Math.max(1, Math.round(BLOCK * fps), Math.ceil(a.totalFrames / MAX_BLOCKS));
   const n = Math.max(1, Math.floor(a.totalFrames / per));
   const dims = 12 + BAND_COUNT + 4;
   const v = new Float32Array(n * dims);
@@ -250,6 +253,10 @@ export function planSections(a: Analysis): Section[] {
     used.add(best);
     out.push({ start: cuts[i], end: cuts[i + 1], design: best, stats: stats[i], fade: changeWidth(score, blockSeconds, cuts[i], a.beatPeriod) });
     prev = best;
+  }
+  // A change can take no longer than the shorter of the two parts it joins, so two changes never overlap.
+  for (let i = 1; i < out.length; i++) {
+    out[i].fade = Math.min(out[i].fade, out[i - 1].end - out[i - 1].start, out[i].end - out[i].start);
   }
   return out;
 }
