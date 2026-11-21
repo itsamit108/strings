@@ -6,37 +6,24 @@
  */
 import type { Analysis } from '../analysis/types';
 import { BAND_COUNT } from '../analysis/types';
-import { chromaAngle, FeatureSampler, fifthsAngle } from '../analysis/finalize';
+import { FeatureSampler, fifthsAngle } from '../analysis/finalize';
 import { oklch } from './color';
+import { BLUE_HUE, chordTones, mixHue, NOTE_HUES, notesHue, valence, vivid, YELLOW_HUE } from './lightmusic';
 import * as S from './shaders';
 
 export type Scene = 'ribbons' | 'rings';
 
-/** Where the circle of fifths sits on the colour wheel (in turns). */
-export const HUE_OFFSET = 0.3;
 /** Internal resolution steps, used only if the device cannot hold its frame rate. */
 const SCALES = [0.5, 0.67, 0.8, 1];
 const TRAIL = 0.07; // seconds a line's light lingers
 const SHAPE_W = 128;
 const SHAPE_H = 48;
-/** How far each ribbon's colour sits from the key colour, in turns of the colour wheel. */
-const RIBBON_HUES = [0, 0.2, 0.45, 0.62];
 /** Waves across the screen for each ribbon: long for bass, short for treble. */
 const RIBBON_CYCLES = [0.8, 1.15, 1.6, 2.2];
 const RIBBON_SPEED = [0.55, 0.75, 1.0, 1.3];
 
 type Uniforms = Record<string, WebGLUniformLocation | null>;
 interface Program { p: WebGLProgram; u: Uniforms }
-
-/** Colour of the notes sounding: each of the twelve notes has its own hue, in rainbow order from C to B. */
-function noteHue(chroma: ArrayLike<number>): number {
-  let x = 0, y = 0;
-  for (let pc = 0; pc < 12; pc++) {
-    x += chroma[pc] * Math.cos((2 * Math.PI * pc) / 12);
-    y += chroma[pc] * Math.sin((2 * Math.PI * pc) / 12);
-  }
-  return Math.atan2(y, x) / (2 * Math.PI) + HUE_OFFSET;
-}
 
 function hash01(n: number): number {
   let h = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
@@ -92,6 +79,10 @@ export class PlateRenderer {
   private energy = 0;
   private kick = 0;
   private live = 0;
+  /** timbral brightness (spectral centroid), smoothed */
+  private brightness = 0.5;
+  /** each ribbon's hue, drifting toward the notes sounding */
+  private ribbonHue = new Float32Array(S.RIBBONS).fill(Number.NaN);
   private idleClock = 0;
 
   private dtSum = 0;
@@ -169,6 +160,8 @@ export class PlateRenderer {
     for (let k = 0; k < S.RIBBONS; k++) this.seedPhase[k] = 2 * Math.PI * hash01((seed >>> 0) + k * 7919);
     this.chroma.fill(0);
     this.energy = this.kick = 0;
+    this.brightness = 0.5;
+    this.ribbonHue.fill(Number.NaN);
     if (this.accum && !this.lost) {
       const gl = this.gl;
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.accum.fbo);
@@ -266,7 +259,8 @@ export class PlateRenderer {
         if (loud > 0.02) {
           // The strongest notes decide the colour (fourth power, so they are not averaged away).
           for (let pc = 0; pc < 12; pc++) this.sharp[pc] = sc[pc] ** 4;
-          colour = oklch(0.74, 0.19, noteHue(this.sharp));
+          // Hue from the notes (physics); louder → more saturated, brighter timbre → lighter.
+          colour = vivid(0.72 + 0.08 * (s.bright - 0.5), notesHue(this.sharp).hue, 0.78 + 0.22 * Math.min(1, loud));
         }
         if ((i & 1) === 0) {
           // Shape of the ring that left the centre at this moment.
@@ -331,14 +325,17 @@ export class PlateRenderer {
     this.energy += (loud - this.energy) * ease(loud > this.energy ? 0.05 : 0.35);
     this.kick = Math.max(this.kick * Math.exp(-dt / 0.12), onset * Math.sqrt(loud));
 
-    // ---- colours: the key of the song picks the palette -------------------
-    const minor = a?.key.minor ?? false;
-    const keyTurn = a ? fifthsAngle(a.key.tonic) : 0.32;
-    // The palette leans a little toward the notes sounding now.
-    const lean = a ? 0.07 * Math.sin(2 * Math.PI * (chromaAngle(this.chroma) - keyTurn)) : 0;
-    const baseHue = keyTurn + HUE_OFFSET + lean;
-    const keyColour = oklch(0.74, 0.19, baseHue);
-    const bg = oklch(minor ? 0.13 : 0.15, 0.05, keyTurn + HUE_OFFSET);
+    // ---- colours (see lightmusic.ts) --------------------------------------
+    if (a && s && playing) this.brightness += (s.bright - this.brightness) * ease(0.4);
+    const minor = a?.key.minor ?? true;
+    const tonic = a?.key.tonic ?? 9; // first screen: A minor
+    // Mood from mode and tempo: fast major leans lighter, more vivid and yellower; slow minor darker and bluer.
+    const mood = a ? valence(minor, a.bpm) : 0;
+    const keyHue = mixHue(NOTE_HUES[tonic], mood >= 0 ? YELLOW_HUE : BLUE_HUE, 0.08 * Math.abs(mood));
+    const keyColour = vivid(0.74, keyHue, 0.9);
+    // A deep room in the key's colour: the darker it is, the more the light stands out.
+    const bg = oklch(0.1 + 0.015 * mood, 0.03, keyHue);
+    const now = notesHue(this.chroma);
 
     const W = this.width, H = this.height, unit = Math.min(W, H);
     const scene: Scene = a ? this.scene : 'ribbons';
@@ -368,12 +365,22 @@ export class PlateRenderer {
       const colA = new Float32Array(S.RIBBONS * 3), colB = new Float32Array(S.RIBBONS * 3);
       const motion = this.motionAt(time);
       const stretch = Math.sqrt(Math.min(1.6, Math.max(0.5, W / H)));
+      // Each ribbon is a note of the key's chord (root at the bottom, then fifth, third, seventh),
+      // coloured by that note's light, and drifting toward the notes sounding now.
+      const tones = chordTones(tonic, minor);
+      const lift = 0.07 * (this.brightness - 0.5) + 0.03 * mood + 0.06 * this.kick;
+      const sat = (0.8 + 0.2 * this.energy + 0.3 * this.kick) * (1 + 0.1 * mood);
       for (let k = 0; k < S.RIBBONS; k++) {
         centres[k] = H * (0.5 + this.centerOffset + gap * (k - (S.RIBBONS - 1) / 2)); // bass at the bottom
         cycles[k] = RIBBON_CYCLES[k] * stretch;
         phase[k] = this.seedPhase[k] + RIBBON_SPEED[k] * motion;
-        colA.set(oklch(0.72, 0.2, baseHue + RIBBON_HUES[k]), k * 3);
-        colB.set(oklch(0.8, 0.17, baseHue + RIBBON_HUES[k] + 0.15), k * 3);
+        const target = mixHue(NOTE_HUES[tones[k]], now.hue, 0.4 * now.clarity * this.live);
+        const h = Number.isNaN(this.ribbonHue[k]) ? target : mixHue(this.ribbonHue[k], target, ease(0.5));
+        this.ribbonHue[k] = h;
+        const L = 0.66 + 0.045 * k + lift; // higher pitch, lighter
+        const rs = sat * (1 - 0.06 * k);   // lower register, more saturated
+        colA.set(vivid(L, h, rs), k * 3);
+        colB.set(vivid(L + 0.08, h + 0.05, rs * 0.92), k * 3);
       }
       gl.uniform1fv(p.u.uCenterY, centres);
       gl.uniform1fv(p.u.uCycles, cycles);

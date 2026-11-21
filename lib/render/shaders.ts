@@ -140,7 +140,7 @@ void main() {
   // Tone map on brightness only, so strong light stays coloured instead of washing to white.
   float m = max(total.r, max(total.g, total.b));
   vec3 mapped = m > 1e-5 ? total / m * (1.0 - exp(-m)) : vec3(0.0);
-  mapped = mix(mapped, vec3(1.0), 0.3 * smoothstep(3.0, 10.0, m));
+  mapped = mix(mapped, vec3(1.0), 0.15 * smoothstep(4.0, 12.0, m));
   float v = length(uv - 0.5);
   vec3 bg = uBg * (1.0 - 0.75 * smoothstep(0.15, 0.85, v));
   vec3 col = pow(clamp(bg + mapped, 0.0, 1.0), vec3(1.0 / 2.2));

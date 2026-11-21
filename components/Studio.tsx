@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { analyzeAudio, synthesizeDemo } from '@/lib/analysis/analyze';
 import type { Analysis } from '@/lib/analysis/types';
-import { fifthsAngle } from '@/lib/analysis/finalize';
 import { Player } from '@/lib/audio/player';
 import { DEMO_TITLE } from '@/lib/demo/synth';
 import { ExportUnsupportedError, exportOffline, offlineExportAvailable } from '@/lib/export/offline';
 import { exportRealtime, realtimeExportAvailable } from '@/lib/export/realtime';
-import { oklch, toCss } from '@/lib/render/color';
-import { HUE_OFFSET, PlateRenderer, type Scene } from '@/lib/render/renderer';
+import { toCss } from '@/lib/render/color';
+import { PlateRenderer, type Scene } from '@/lib/render/renderer';
+import { NOTE_HUES, vivid } from '@/lib/render/lightmusic';
 
 type Phase = 'idle' | 'loading' | 'ready';
 type Shape = 'landscape' | 'portrait' | 'square';
@@ -41,7 +41,8 @@ function drawArc(canvas: HTMLCanvasElement, a: Analysis) {
   for (let x = 0; x < w; x += step) {
     const i = Math.min(a.arc.length - 1, Math.floor((x / w) * a.arc.length));
     const half = Math.max(dpr, a.arc[i] * (mid - dpr));
-    g.fillStyle = toCss(oklch(0.84, 0.1, a.arcHue[i] + HUE_OFFSET));
+    // arcHue is a place on the circle of fifths; turn it back into a note and use that note's light.
+    g.fillStyle = toCss(vivid(0.84, NOTE_HUES[(7 * Math.round(a.arcHue[i] * 12)) % 12], 0.6));
     g.fillRect(x, mid - half, Math.max(1, step - dpr), half * 2);
   }
 }
@@ -194,7 +195,7 @@ export default function Studio() {
     p.load(audio);
     setSong(s);
     setPhase('ready');
-    document.documentElement.style.setProperty('--song', toCss(oklch(0.84, 0.11, fifthsAngle(analysis.key.tonic) + HUE_OFFSET)));
+    document.documentElement.style.setProperty('--song', toCss(vivid(0.84, NOTE_HUES[analysis.key.tonic], 0.7)));
     void p.play();
   }, [getPlayer]);
 
