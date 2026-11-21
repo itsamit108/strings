@@ -48,6 +48,16 @@ design twice in a row; designs cross-fade over about four beats. Code: `lib/anal
 
 `?design=plate` (or `figure`, `ripples`, `membrane`, `rings`, `ribbons`) shows one design on its own, for checking.
 
+### Bass and voice
+
+- Bass: for the same loudness, a low sound moves the air farther than a high one (displacement ∝ 1/f),
+  so bass makes every design swell (up to about 13%). A bass hit, a fast rise in the two lowest pitch
+  ranges, gives a short swell and glow, throws the plate's sand, strengthens the ripple tank's lower
+  source, drives the drum skin's whole-skin (fundamental) mode and sends a wave across the sky.
+- Voice range (pitch ranges 4–6, about 315 Hz – 2.5 kHz, where voices carry their formants): when strong,
+  lines glow brighter and wider, the drum skin's middle modes swell and the nebula warms; a voice coming
+  in blooms once. Without separating the singer from the music this is the voice range, not a voice detector.
+
 ### Colour
 
 - Hue: a note's frequency raised by octaves (×2, about 40 times) into the octave of visible light,

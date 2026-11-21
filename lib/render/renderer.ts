@@ -74,6 +74,10 @@ interface DrawCtx {
   W: number; H: number; unit: number; time: number; dt: number; ease: (tau: number) => number; level: number;
   tonic: number; minor: boolean; mood: number; now: { hue: number; clarity: number };
   cx: number; cy: number; order: number[];
+  /** size swell from the bass */
+  pulse: number;
+  /** line width from the voice range */
+  voiceWide: number;
 }
 const smooth01 = (e0: number, e1: number, x: number) => {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -160,6 +164,14 @@ export class PlateRenderer {
   /** pitch-range levels, smoothed */
   private bandsNow = new Float32Array(BAND_COUNT);
   private bassE = 0;
+  /** bass level now (fast) and a short envelope after each bass hit */
+  private bassNow = 0;
+  private bassHit = 0;
+  private prevBass = 0;
+  /** voice range (pitch ranges 4–6, about 315 Hz – 2.5 kHz) now, and a short envelope when it comes in */
+  private voiceNow = 0;
+  private voiceIn = 0;
+  private prevVoice = 0;
   private trebleE = 0;
   /** phases that run on with the music (kept, so nothing jumps when the notes change) */
   private figurePhase = 0;
@@ -278,6 +290,8 @@ export class PlateRenderer {
     this.plateW.fill(0);
     this.bandsNow.fill(0);
     this.bassE = this.trebleE = 0;
+    this.bassNow = this.bassHit = this.prevBass = 0;
+    this.voiceNow = this.voiceIn = this.prevVoice = 0;
     this.figurePhase = 0;
     this.hits.fill(0);
     this.hitNext = 0;
@@ -424,15 +438,16 @@ export class PlateRenderer {
       maxW: W * (tall ? 0.8 : 0.24), align: tall ? 'center' : 'left', shadow: unit * 0.012,
     }, (g, box) => {
       // Where to make your own: small and quiet, with the title and artist.
-      const px = unit * (tall ? 0.019 : 0.016);
+      const px = unit * (tall ? 0.026 : 0.016);
       g.font = `450 ${px}px "Instrument Sans Variable", system-ui, "Segoe UI", sans-serif`;
       g.shadowColor = 'rgba(0,0,0,0.6)';
       g.shadowBlur = unit * 0.01;
-      g.fillStyle = 'rgba(214,208,196,0.62)';
+      g.fillStyle = tall ? 'rgba(226,220,208,0.78)' : 'rgba(214,208,196,0.62)';
       g.textBaseline = 'alphabetic';
       if (tall) {
+        // On a phone it stands on its own at the bottom, apart from the title.
         g.textAlign = 'center';
-        g.fillText(CREDIT, W / 2, (box.bottom > 0 ? box.bottom : H * (0.075 + this.safeTop)) + px * 1.9);
+        g.fillText(CREDIT, W / 2, H * 0.955);
       } else {
         g.textAlign = 'right';
         g.fillText(CREDIT, W * 0.955, box.bottom > 0 ? box.bottom - unit * 0.008 : H * 0.8);
@@ -585,9 +600,9 @@ export class PlateRenderer {
     this.skyFlow[1] += flowSpeed * dt * 0.35;
     this.skyRot += 0.0045 * tempo * (0.6 + 0.8 * this.energy) * dt;
     // A clear onset sends a wave out from the centre (at most one per quarter second).
-    if (a && playing && onset > 0.35 && time - this.lastHit > 0.25) {
+    if (a && playing && (onset > 0.35 || this.bassHit > 0.5) && time - this.lastHit > 0.25) {
       this.hits[this.hitNext * 2] = time;
-      this.hits[this.hitNext * 2 + 1] = Math.min(1, onset * (0.4 + loud));
+      this.hits[this.hitNext * 2 + 1] = Math.min(1, Math.max(onset * (0.4 + loud), this.bassHit));
       this.hitNext = (this.hitNext + 1) % 6;
       this.lastHit = time;
     }
@@ -596,6 +611,20 @@ export class PlateRenderer {
     if (s && a) for (let k = 0; k < BAND_COUNT; k++) this.bandsNow[k] += ((playing ? s.bands[k] : 0) - this.bandsNow[k]) * ease(0.25);
     this.bassE += ((this.bandsNow[0] + this.bandsNow[1]) / 2 - this.bassE) * ease(1.5);
     this.trebleE += ((this.bandsNow[6] + this.bandsNow[7]) / 2 - this.trebleE) * ease(0.3);
+    // Bass. For the same loudness, a low sound moves the air farther than a high one (displacement ∝ 1/f),
+    // so bass is what makes the designs swell. A bass hit is a fast rise in the two lowest pitch ranges.
+    const bassIn = s && a && playing ? (s.bands[0] + s.bands[1]) / 2 : 0;
+    this.bassNow += (bassIn - this.bassNow) * ease(bassIn > this.bassNow ? 0.03 : 0.15);
+    const rise = (bassIn - this.prevBass) / dt;
+    this.prevBass = bassIn;
+    this.bassHit = Math.max(this.bassHit * Math.exp(-dt / 0.2), Math.min(1, Math.max(0, (rise - 1.2) / 5)));
+    // Voice range: where voices carry their formants (the resonances of the vocal tract). When it is strong,
+    // the lines glow brighter and a little wider, as a resonance does; a voice coming in blooms once.
+    const voiceInNow = s && a && playing ? (s.bands[3] + s.bands[4] + s.bands[5]) / 3 : 0;
+    this.voiceNow += (voiceInNow - this.voiceNow) * ease(voiceInNow > this.voiceNow ? 0.05 : 0.3);
+    const vRise = (voiceInNow - this.prevVoice) / dt;
+    this.prevVoice = voiceInNow;
+    this.voiceIn = Math.max(this.voiceIn * Math.exp(-dt / 0.6), Math.min(1, Math.max(0, (vRise - 1.0) / 4)));
     // The strongest notes, sharpened (fourth power) so they are not averaged away.
     let sharpSum = 0;
     for (let pc = 0; pc < 12; pc++) { this.sharp[pc] = this.chroma[pc] ** 4; sharpSum += this.sharp[pc]; }
@@ -604,7 +633,9 @@ export class PlateRenderer {
       this.plateW[pc] += (w - this.plateW[pc]) * ease(0.35);
     }
     const order = Array.from({ length: 12 }, (_, i) => i).sort((x, y) => this.plateW[y] - this.plateW[x]);
-    const ctx: DrawCtx = { W, H, unit, time, dt, ease, level, tonic, minor, mood, now, cx: W / 2, cy: H * (0.5 + this.centerOffset), order };
+    const pulse = 1 + 0.07 * this.bassNow + 0.06 * this.bassHit;
+    const voiceWide = 1 + 0.35 * this.voiceNow;
+    const ctx: DrawCtx = { W, H, unit, time, dt, ease, level: level * (1 + 0.35 * this.bassHit) * (1 + 0.3 * this.voiceNow + 0.35 * this.voiceIn), tonic, minor, mood, now, cx: W / 2, cy: H * (0.5 + this.centerOffset), order, pulse, voiceWide };
 
     const plan = !a ? { shown: [{ design: 'ribbons' as Design, weight: 1 }], blend: 0 }
       : this.force ? { shown: [{ design: this.force, weight: 1 }], blend: 0 }
@@ -642,7 +673,7 @@ export class PlateRenderer {
     gl.uniform1f(pr.u.uStarDensity, Math.min(0.34, 0.1 + 1.6 * this.songBusy));
     gl.uniform1f(pr.u.uWarm, 0.6 * this.songBright + 0.4 * this.brightness);
     gl.uniform1f(pr.u.uTwinkle, 0.12 + 0.7 * this.trebleE);
-    gl.uniform1f(pr.u.uNebula, 0.5 + 1.4 * this.bassE);
+    gl.uniform1f(pr.u.uNebula, 0.5 + 1.4 * this.bassE + 0.8 * this.voiceNow + 0.8 * this.voiceIn);
     // Nebula: the colour of the notes sounding now, shading into the key's fifth.
     const nA = vivid(0.5, a ? mixHue(keyHue, now.hue, 0.7 * now.clarity) : keyHue, 0.7), nB = vivid(0.5, NOTE_HUES[(tonic + 7) % 12], 0.7);
     gl.uniform3f(pr.u.uNebA, nA[0] * 0.05, nA[1] * 0.05, nA[2] * 0.05);
@@ -719,8 +750,8 @@ export class PlateRenderer {
       gl.uniform1fv(p.u.uPhase, phase);
       gl.uniform3fv(p.u.uColA, colA);
       gl.uniform3fv(p.u.uColB, colB);
-      gl.uniform1f(p.u.uAmp, H * (tall ? 0.085 : this.compact ? 0.11 : 0.125));
-      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.15);
+      gl.uniform1f(p.u.uAmp, H * (tall ? 0.085 : this.compact ? 0.11 : 0.125) * c.pulse);
+      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.15 * c.voiceWide);
       gl.uniform1f(p.u.uIntensity, lvl * 1.15);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     } else if (design === 'rings') {
@@ -729,10 +760,10 @@ export class PlateRenderer {
       gl.uniform1i(p.u.uHist, 1);
       gl.uniform1i(p.u.uShape, 2);
       gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
-      gl.uniform1f(p.u.uRmax, 0.45 * unit);
+      gl.uniform1f(p.u.uRmax, 0.45 * unit * c.pulse);
       gl.uniform1f(p.u.uTime, c.time);
       gl.uniform1f(p.u.uRingT, (this.analysis?.beatPeriod ?? 0.6) / 2);
-      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.5);
+      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.5 * c.voiceWide);
       gl.uniform1f(p.u.uIntensity, lvl * 1.5);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     } else if (design === 'plate') {
@@ -744,12 +775,12 @@ export class PlateRenderer {
         cols.set(note(pc, 0.74), pc * 3);
       }
       gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
-      gl.uniform1f(p.u.uHalf, 0.41 * unit);
+      gl.uniform1f(p.u.uHalf, 0.41 * unit * c.pulse);
       gl.uniform2fv(p.u.uModes, modes);
       gl.uniform1fv(p.u.uWeight, this.plateW);
       gl.uniform3fv(p.u.uCol, cols);
-      gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.3);
-      gl.uniform1f(p.u.uJump, Math.min(1, this.kick * 1.5));
+      gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.3 * c.voiceWide);
+      gl.uniform1f(p.u.uJump, Math.min(1, Math.max(this.kick * 1.5, this.bassHit)));
       gl.uniform1f(p.u.uTime, c.time);
       gl.uniform1f(p.u.uIntensity, lvl * 1.6);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -773,7 +804,7 @@ export class PlateRenderer {
         gl.useProgram(p.p);
         gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
         gl.uniform2f(p.u.uRes, W, H);
-        gl.uniform1f(p.u.uAmp, unit * (0.3 + 0.08 * this.energy));
+        gl.uniform1f(p.u.uAmp, unit * (0.3 + 0.08 * this.energy) * c.pulse);
         gl.uniform1f(p.u.uP, pn);
         gl.uniform1f(p.u.uQ, qn);
         gl.uniform1f(p.u.uPhase, this.figurePhase + Math.PI / 2);
@@ -782,7 +813,7 @@ export class PlateRenderer {
         // Pendulum damping: loud, full sound keeps the swing wide for longer.
         gl.uniform1f(p.u.uDamp, -Math.log(0.3 + 0.35 * this.energy) / (2 * Math.PI * loops));
         gl.uniform1f(p.u.uPoints, FIGURE_POINTS);
-        gl.uniform1f(p.u.uPointPx, Math.max(1.5, (unit / 900) * 3));
+        gl.uniform1f(p.u.uPointPx, Math.max(1.5, (unit / 900) * 3 * c.voiceWide));
         const A = note(lo), B = note(hi);
         gl.uniform3f(p.u.uColA, A[0], A[1], A[2]);
         gl.uniform3f(p.u.uColB, B[0], B[1], B[2]);
@@ -802,7 +833,7 @@ export class PlateRenderer {
         this.ripplePhase[1] += 2 * Math.PI * speed * (fHi / fRef) * c.dt;
         gl.uniform1fv(p.u.uK, [kLo, kHi]);
         gl.uniform1fv(p.u.uPhase, this.ripplePhase);
-        const aLo = this.plateW[lo] + 0.2 * this.bassE, aHi = (n2 === n1 ? this.plateW[lo] : this.plateW[hi]) + 0.1;
+        const aLo = this.plateW[lo] + 0.2 * this.bassE + 0.6 * this.bassHit, aHi = (n2 === n1 ? this.plateW[lo] : this.plateW[hi]) + 0.1;
         gl.uniform1fv(p.u.uAmp, [aLo, aHi]);
         const A = note(lo), B = note(hi);
         gl.uniform3fv(p.u.uCol, [...A, ...B]);
@@ -817,19 +848,19 @@ export class PlateRenderer {
       gl.activeTexture(gl.TEXTURE4);
       gl.bindTexture(gl.TEXTURE_2D, this.besselTex);
       gl.uniform1i(p.u.uBessel, 4);
-      // Mode 0 (the whole skin breathing) follows loudness; mode n follows pitch range n.
+      // Mode 0, the whole skin breathing (the drum's fundamental), follows the bass; mode n follows pitch range n.
       const amp = new Float32Array(9);
-      amp[0] = 0.5 * this.energy;
+      amp[0] = 0.45 * this.bassNow + 0.7 * this.bassHit;
       for (let n = 1; n < 9; n++) amp[n] = this.bandsNow[n - 1];
       let total = 0;
       for (let n = 0; n < 9; n++) total += amp[n];
       for (let n = 0; n < 9; n++) {
-        amp[n] = (amp[n] / (0.6 + total)) * 1.1;
+        amp[n] = (amp[n] / (0.6 + total)) * 1.1 * (n >= 4 && n <= 6 ? 1 + 0.8 * this.voiceNow : 1);
         // Each mode turns at a speed in proportion to its frequency (j_n1), alternating direction.
         this.membraneTurn[n] += (n % 2 ? 1 : -1) * 0.05 * (BESSEL_ZEROS[n] / BESSEL_ZEROS[0]) * c.dt * (0.3 + this.energy);
       }
       gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
-      gl.uniform1f(p.u.uRadius, 0.43 * unit);
+      gl.uniform1f(p.u.uRadius, 0.43 * unit * c.pulse);
       gl.uniform1fv(p.u.uAmp, amp);
       gl.uniform1fv(p.u.uTurn, this.membraneTurn);
       const inner = note(c.order[0], 0.76);
@@ -837,7 +868,7 @@ export class PlateRenderer {
       gl.uniform3f(p.u.uColIn, inner[0], inner[1], inner[2]);
       gl.uniform3f(p.u.uColOut, outer[0], outer[1], outer[2]);
       gl.uniform1f(p.u.uLines, 14);
-      gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.1);
+      gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.1 * c.voiceWide);
       gl.uniform1f(p.u.uIntensity, lvl * 1.3);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
