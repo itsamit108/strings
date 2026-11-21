@@ -1,3 +1,5 @@
+import { decodeWithWebCodecs, isMp4, readMp4Audio, toAdts } from './mp4audio';
+
 /** Sample-accurate playback of a decoded song, with a clock the visuals can trust. */
 export class Player {
   readonly ctx: AudioContext;
@@ -21,7 +23,23 @@ export class Player {
   get output(): AudioNode { return this.gain; }
 
   async decode(data: ArrayBuffer): Promise<AudioBuffer> {
-    return await this.ctx.decodeAudioData(data);
+    // decodeAudioData detaches the buffer it is given, so keep the original for the fallback.
+    try {
+      return await this.ctx.decodeAudioData(data.slice(0));
+    } catch (first) {
+      // Chromium can't read fragmented MP4s (screen recorders, many downloads) and some MOVs.
+      // Pull the sound frames out ourselves and decode those instead.
+      if (!isMp4(data)) throw first;
+      const track = readMp4Audio(data);
+      if (!track) throw first;
+      const adts = toAdts(track);
+      if (adts) {
+        try {
+          return await this.ctx.decodeAudioData(adts);
+        } catch { /* try WebCodecs below */ }
+      }
+      return await decodeWithWebCodecs(track, this.ctx);
+    }
   }
 
   load(buffer: AudioBuffer) {
