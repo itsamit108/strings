@@ -219,6 +219,25 @@ function fragmentFrames(v: DataView, bytes: Uint8Array, trackId: number, moov: B
   return frames;
 }
 
+/** The sample-entry type of the sound track (e.g. "mp4a", "samr"), or null when there is none. */
+export function mp4SoundCodec(data: ArrayBuffer): string | null {
+  const v = new DataView(data);
+  const moov = [...boxes(v, 0, data.byteLength)].find((b) => b.type === 'moov');
+  if (!moov) return null;
+  for (const trak of boxes(v, moov.body, moov.end)) {
+    if (trak.type !== 'trak') continue;
+    const hdlr = path(v, trak, 'mdia', 'hdlr');
+    if (!hdlr || String.fromCharCode(...new Uint8Array(data, hdlr.body + 8, 4)) !== 'soun') continue;
+    const stsd = path(v, trak, 'mdia', 'minf', 'stbl', 'stsd');
+    const entry = stsd && (boxes(v, stsd.body + 8, stsd.end).next().value as Box | undefined);
+    return entry ? entry.type : 'unknown';
+  }
+  return null;
+}
+
+const CODEC_NAMES: Record<string, string> = { samr: 'AMR (phone voice)', sawb: 'AMR-WB (phone voice)', 'ac-3': 'Dolby Digital (AC-3)', 'ec-3': 'Dolby Digital Plus', alac: 'Apple Lossless', 'fLaC': 'FLAC', '.mp3': 'MP3' };
+export const codecName = (fourcc: string) => CODEC_NAMES[fourcc] ?? fourcc;
+
 /** True when the bytes look like an ISO media file (MP4, M4A, MOV, 3GP). */
 export function isMp4(data: ArrayBuffer): boolean {
   if (data.byteLength < 12) return false;

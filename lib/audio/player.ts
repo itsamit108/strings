@@ -1,4 +1,4 @@
-import { decodeWithWebCodecs, isMp4, readMp4Audio, toAdts } from './mp4audio';
+import { codecName, decodeWithWebCodecs, isMp4, mp4SoundCodec, readMp4Audio, toAdts } from './mp4audio';
 
 /** Sample-accurate playback of a decoded song, with a clock the visuals can trust. */
 export class Player {
@@ -31,7 +31,10 @@ export class Player {
       // Pull the sound frames out ourselves and decode those instead.
       if (!isMp4(data)) throw first;
       const track = readMp4Audio(data);
-      if (!track) throw first;
+      if (!track) {
+        const codec = mp4SoundCodec(data);
+        throw new Error(codec === null ? 'no-sound-track' : `codec:${codecName(codec)}`);
+      }
       const adts = toAdts(track);
       if (adts) {
         try {

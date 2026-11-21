@@ -129,6 +129,7 @@ export async function exportOffline(o: OfflineExportOptions): Promise<Blob | nul
   r.centerOffset = 0;
   r.compact = false;
   r.resize(o.width, o.height, true);
+  r.setSafeTop(0); // the video has no controls over it
   r.seed(o.analysis.seed);
 
   // Exactly as long as the uploaded sound, to the nearest frame.

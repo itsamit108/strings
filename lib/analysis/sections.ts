@@ -36,6 +36,8 @@ export interface Section {
   design: Design;
   /** raw measurements, kept for the explanation and for tests */
   stats: SectionStats;
+  /** seconds the change into this section takes: as wide as the change in the music itself */
+  fade: number;
 }
 
 export interface SectionStats {
@@ -246,32 +248,46 @@ export function planSections(a: Analysis): Section[] {
       if (s > bestS) { bestS = s; best = d; }
     }
     used.add(best);
-    out.push({ start: cuts[i], end: cuts[i + 1], design: best, stats: stats[i] });
+    out.push({ start: cuts[i], end: cuts[i + 1], design: best, stats: stats[i], fade: changeWidth(score, blockSeconds, cuts[i], a.beatPeriod) });
     prev = best;
   }
   return out;
 }
 
-/** Which designs are showing at `time`, and how strongly (they cross-fade around each boundary). */
-export function designsAt(sections: Section[], time: number, fade: number): { design: Design; weight: number }[] {
-  if (!sections.length) return [{ design: 'ribbons', weight: 1 }];
-  for (let k = 0; k < sections.length; k++) {
-    const s = sections[k];
-    if (time < s.end || k === sections.length - 1) {
-      const next = sections[k + 1];
-      if (next && time > s.end - fade / 2) {
-        const w = Math.min(1, Math.max(0, (time - (s.end - fade / 2)) / fade));
-        const e = w * w * (3 - 2 * w);
-        return [{ design: s.design, weight: 1 - e }, { design: next.design, weight: e }];
-      }
-      const prevS = sections[k - 1];
-      if (prevS && time < s.start + fade / 2) {
-        const w = Math.min(1, Math.max(0, (time - (s.start - fade / 2)) / fade));
-        const e = w * w * (3 - 2 * w);
-        return [{ design: prevS.design, weight: 1 - e }, { design: s.design, weight: e }];
-      }
-      return [{ design: s.design, weight: 1 }];
-    }
-  }
-  return [{ design: sections[sections.length - 1].design, weight: 1 }];
+/**
+ * How long the change at `at` takes in the music: the width of the novelty peak at half its height.
+ * A sudden change (a drop, an entrance) gives a narrow peak, a gradual one a wide peak. Kept between
+ * 2 and 8 beats, so it moves in the song's own time.
+ */
+function changeWidth(score: Float32Array, blockSeconds: number, at: number, beat: number): number {
+  const c = Math.round(at / blockSeconds);
+  if (c <= 0 || c >= score.length) return 4 * beat;
+  const half = score[c] / 2;
+  let l = c, r = c;
+  while (l > 0 && score[l - 1] > half && c - l < 24) l--;
+  while (r < score.length - 1 && score[r + 1] > half && r - c < 24) r++;
+  const width = (r - l + 1) * blockSeconds;
+  return Math.min(8 * beat, Math.max(2 * beat, width));
+}
+
+/**
+ * Which designs are showing at `time`, and how strongly. Around each boundary the outgoing and incoming
+ * designs cross with an equal-power curve (cos / sin), as sound engineers cross-fade two tracks, so the
+ * picture never dips in the middle. `blend` is 0 away from boundaries and 1 at the middle of a change.
+ */
+export function designsAt(sections: Section[], time: number): { shown: { design: Design; weight: number }[]; blend: number } {
+  if (!sections.length) return { shown: [{ design: 'ribbons', weight: 1 }], blend: 0 };
+  let k = sections.findIndex((s) => time < s.end);
+  if (k < 0) k = sections.length - 1;
+  const cross = (from: Design, to: Design, start: number, fade: number) => {
+    const w = Math.min(1, Math.max(0, (time - (start - fade / 2)) / fade));
+    return {
+      shown: [{ design: from, weight: Math.cos((w * Math.PI) / 2) }, { design: to, weight: Math.sin((w * Math.PI) / 2) }],
+      blend: Math.sin(w * Math.PI),
+    };
+  };
+  const s = sections[k], next = sections[k + 1], prev = sections[k - 1];
+  if (next && time > s.end - next.fade / 2) return cross(s.design, next.design, next.start, next.fade);
+  if (prev && time < s.start + s.fade / 2) return cross(prev.design, s.design, s.start, s.fade);
+  return { shown: [{ design: s.design, weight: 1 }], blend: 0 };
 }

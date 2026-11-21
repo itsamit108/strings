@@ -66,6 +66,8 @@ function plateMode(rel: number): [number, number] {
 /** Simplest whole-number ratio for each interval in semitones (just intonation), upper : lower. */
 const JUST: [number, number][] = [[1, 1], [16, 15], [9, 8], [6, 5], [5, 4], [4, 3], [45, 32], [3, 2], [8, 5], [5, 3], [9, 5], [15, 8]];
 const FIGURE_POINTS = 14000;
+/** Shown with the title and artist, in the picture and the video. */
+const CREDIT = 'Create yours at strings-coral.vercel.app';
 
 type Uniforms = Record<string, WebGLUniformLocation | null>;
 interface DrawCtx {
@@ -166,6 +168,15 @@ export class PlateRenderer {
   /** whole-song measurements for the sky */
   private songBright = 0.5;
   private songBusy = 0.05;
+  /** 0 away from a change of design, 1 in the middle of one */
+  private blend = 0;
+  /** share of the picture's height covered by controls at the top (0 when exporting) */
+  private safeTop = 0;
+  setSafeTop(v: number) {
+    if (Math.abs(v - this.safeTop) < 0.002) return;
+    this.safeTop = v;
+    this.drawCaption();
+  }
   /** the sky's motion: cloud flow, turn, and the last few hits sending waves outward */
   private skyFlow = [0, 0];
   private skyRot = 0;
@@ -358,6 +369,7 @@ export class PlateRenderer {
     const draw = (
       canvas: HTMLCanvasElement, tex: WebGLTexture,
       o: { x: number; base: number; tPx: number; aPx: number; maxW: number; align: CanvasTextAlign; shadow: number },
+      extra?: (g: CanvasRenderingContext2D, box: { bottom: number }) => void,
     ) => {
       canvas.width = W; canvas.height = H;
       const g = canvas.getContext('2d')!;
@@ -395,6 +407,7 @@ export class PlateRenderer {
         const top = o.base - tSize, bottom = artist ? aBase + aSize * 0.4 : o.base + tSize * 0.3;
         box = { x0: x0 / W, x1: (x0 + w) / W, y0: top / H, y1: bottom / H };
       }
+      extra?.(g, { bottom: box.y1 * H });
       gl.activeTexture(gl.TEXTURE3);
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
@@ -406,9 +419,24 @@ export class PlateRenderer {
       maxW: W * (tall ? 0.84 : 0.62), align: tall ? 'center' : 'left', shadow: unit * 0.02,
     });
     this.labelBox = draw(this.labelCanvas ?? (this.labelCanvas = document.createElement('canvas')), this.labelTex, {
-      x: tall ? W / 2 : W * 0.045, base: H * (tall ? 0.075 : 0.77),
+      x: tall ? W / 2 : W * 0.045, base: H * (tall ? 0.075 + this.safeTop : 0.77),
       tPx: unit * (tall ? 0.042 : 0.034), aPx: unit * (tall ? 0.024 : 0.021),
       maxW: W * (tall ? 0.8 : 0.24), align: tall ? 'center' : 'left', shadow: unit * 0.012,
+    }, (g, box) => {
+      // Where to make your own: small and quiet, with the title and artist.
+      const px = unit * (tall ? 0.019 : 0.016);
+      g.font = `450 ${px}px "Instrument Sans Variable", system-ui, "Segoe UI", sans-serif`;
+      g.shadowColor = 'rgba(0,0,0,0.6)';
+      g.shadowBlur = unit * 0.01;
+      g.fillStyle = 'rgba(214,208,196,0.62)';
+      g.textBaseline = 'alphabetic';
+      if (tall) {
+        g.textAlign = 'center';
+        g.fillText(CREDIT, W / 2, (box.bottom > 0 ? box.bottom : H * (0.075 + this.safeTop)) + px * 1.9);
+      } else {
+        g.textAlign = 'right';
+        g.fillText(CREDIT, W * 0.955, box.bottom > 0 ? box.bottom - unit * 0.008 : H * 0.8);
+      }
     });
   }
 
@@ -537,7 +565,8 @@ export class PlateRenderer {
     this.readHistory(time, keyColour);
 
     // ---- light buffer -----------------------------------------------------
-    const fade = Math.exp(-dt / TRAIL);
+    // During a change of design the light lingers longer, like a reverb tail, so one dissolves into the next.
+    const fade = Math.exp(-dt / (TRAIL + 0.28 * this.blend));
     const level = (1 - fade) * (0.5 + 0.5 * this.live) * (0.8 + 0.45 * this.energy + 0.5 * this.kick);
     gl.bindVertexArray(this.vao);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.accum.fbo);
@@ -577,9 +606,11 @@ export class PlateRenderer {
     const order = Array.from({ length: 12 }, (_, i) => i).sort((x, y) => this.plateW[y] - this.plateW[x]);
     const ctx: DrawCtx = { W, H, unit, time, dt, ease, level, tonic, minor, mood, now, cx: W / 2, cy: H * (0.5 + this.centerOffset), order };
 
-    const shown = !a ? [{ design: 'ribbons' as Design, weight: 1 }]
-      : this.force ? [{ design: this.force, weight: 1 }]
-      : designsAt(this.sections, time, Math.min(4, Math.max(2, 4 * a.beatPeriod)));
+    const plan = !a ? { shown: [{ design: 'ribbons' as Design, weight: 1 }], blend: 0 }
+      : this.force ? { shown: [{ design: this.force, weight: 1 }], blend: 0 }
+      : designsAt(this.sections, time);
+    const shown = plan.shown;
+    this.blend = plan.blend;
     let top = shown[0];
     for (const d of shown) if (d.weight > top.weight) top = d;
     this.current = top.design;

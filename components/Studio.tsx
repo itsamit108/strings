@@ -154,6 +154,17 @@ export default function Studio() {
       // In the 9:16 frame, lay out exactly as the exported video will be.
       r.centerOffset = first ? (tall ? 0.24 : 0.1) : framed ? 0 : tall ? 0.02 : 0.04;
       r.resize(w, h);
+      // Keep the title and artist on the picture clear of the controls along the top.
+      const cb = canvas.getBoundingClientRect();
+      let safe = 0;
+      const top = stage.querySelector('.top');
+      if (top && cb.height > cb.width) {
+        for (const el of Array.from(top.querySelectorAll('.mark, .tools > *'))) {
+          const b = el.getBoundingClientRect();
+          if (b.width && b.right > cb.left + cb.width * 0.15 && b.left < cb.right - cb.width * 0.15) safe = Math.max(safe, (b.bottom - cb.top) / cb.height);
+        }
+      }
+      r.setSafeTop(Math.max(0, safe));
       const a = songRef.current?.analysis;
       if (a) for (const c of [arcRef.current, arcPlayedRef.current]) if (c) drawArc(c, a);
     };
@@ -215,6 +226,14 @@ export default function Studio() {
     void p.play();
   }, [getPlayer, applyCaption]);
 
+  /** Says why a file gave no sound, as exactly as the file allows. */
+  const noSound = (name: string, e: unknown) => {
+    const m = (e as Error)?.message ?? '';
+    if (m === 'no-sound-track') return `"${name}" has no sound track: it is a silent video. Choose a video with sound, or a song.`;
+    if (m.startsWith('codec:')) return `The sound in "${name}" is stored as ${m.slice(6)}, which this browser cannot decode. Try an MP3, WAV, FLAC, OGG or M4A file.`;
+    return `"${name}" has no sound this browser can read. Try an MP3, WAV, FLAC, OGG or M4A file, or an MP4 or WebM video with a soundtrack.`;
+  };
+
   const fail = useCallback((message: string) => {
     setError(message);
     setPhase(songRef.current ? 'ready' : 'idle');
@@ -232,8 +251,8 @@ export default function Studio() {
     const info = readSongInfo(file);
     try {
       audio = await p.decode(await file.arrayBuffer());
-    } catch {
-      fail(`"${file.name}" has no sound this browser can read. Try an MP3, WAV, FLAC, OGG or M4A file, or an MP4 or WebM video with a soundtrack.`);
+    } catch (e) {
+      fail(noSound(file.name, e));
       return;
     }
     try {
