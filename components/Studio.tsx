@@ -13,6 +13,10 @@ import { HUE_OFFSET, PlateRenderer, type Scene } from '@/lib/render/renderer';
 
 type Phase = 'idle' | 'loading' | 'ready';
 type Shape = 'landscape' | 'portrait' | 'square';
+/** How the picture is framed on screen: fill the screen, or a 9:16 phone frame (Reels, Shorts). */
+type Frame = 'screen' | 'tall';
+/** Reels and Shorts both take videos up to three minutes. */
+const SHORTS_LIMIT = 180;
 type ExportState =
   | { stage: 'options' }
   | { stage: 'running'; live: boolean }
@@ -64,6 +68,7 @@ export default function Studio() {
   const lastSeek = useRef(0);
   const phaseRef = useRef<Phase>('idle');
   const sceneRef = useRef<Scene>('ribbons');
+  const frameRef = useRef<Frame>('screen');
 
   const [phase, setPhase] = useState<Phase>('idle');
   const [status, setStatus] = useState('');
@@ -80,6 +85,15 @@ export default function Studio() {
   const [size, setSize] = useState(1080);
   const [fps, setFps] = useState(60);
   const [scene, setScene] = useState<Scene>('ribbons');
+  const [frame, setFrame] = useState<Frame>('screen');
+
+  const chooseFrame = (next: Frame) => {
+    frameRef.current = next;
+    setFrame(next);
+    setShape(next === 'tall' ? 'portrait' : 'landscape');
+    // The canvas changes size with the CSS class; measure once it has.
+    requestAnimationFrame(() => fit.current());
+  };
 
   const chooseScene = (next: Scene) => {
     sceneRef.current = next;
@@ -114,14 +128,17 @@ export default function Studio() {
     fit.current = () => {
       if (offline.current) return;
       const dpr = window.devicePixelRatio || 1;
-      let w = stage.clientWidth * dpr, h = stage.clientHeight * dpr;
+      // The canvas fills the stage, or a 9:16 frame inside it.
+      let w = (canvas.clientWidth || stage.clientWidth) * dpr, h = (canvas.clientHeight || stage.clientHeight) * dpr;
       const k = Math.min(1, Math.sqrt(MAX_PIXELS / (w * h)));
       w *= k; h *= k;
       // Leave room for the controls under the plate.
       const tall = h > w;
       const first = phaseRef.current !== 'ready';
+      const framed = !first && frameRef.current === 'tall';
       r.compact = first; // on the first screen the waves stay clear of the text
-      r.centerOffset = first ? (tall ? 0.24 : 0.1) : tall ? 0.02 : 0.04;
+      // In the 9:16 frame, lay out exactly as the exported video will be.
+      r.centerOffset = first ? (tall ? 0.24 : 0.1) : framed ? 0 : tall ? 0.02 : 0.04;
       r.resize(w, h);
       const a = songRef.current?.analysis;
       if (a) for (const c of [arcRef.current, arcPlayedRef.current]) if (c) drawArc(c, a);
@@ -412,7 +429,7 @@ export default function Studio() {
   return (
     <div
       ref={stageRef}
-      className={`stage${quiet && ready ? ' quiet' : ''}${dragging ? ' dragging' : ''}`}
+      className={`stage${quiet && ready ? ' quiet' : ''}${dragging ? ' dragging' : ''}${ready && frame === 'tall' ? ' tall' : ''}`}
       onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
       onDragLeave={() => setDragging(false)}
       onDrop={(e) => {
@@ -465,6 +482,10 @@ export default function Studio() {
               <span className="designs" role="group" aria-label="Design">
                 <button aria-pressed={scene === 'ribbons'} onClick={() => chooseScene('ribbons')}>Ribbons</button>
                 <button aria-pressed={scene === 'rings'} onClick={() => chooseScene('rings')}>Rings</button>
+              </span>
+              <span className="designs" role="group" aria-label="Frame">
+                <button aria-pressed={frame === 'screen'} onClick={() => chooseFrame('screen')} title="Fill the screen">Screen</button>
+                <button aria-pressed={frame === 'tall'} onClick={() => chooseFrame('tall')} title="Phone frame for Reels, Shorts and TikTok">9:16</button>
               </span>
               <button onClick={() => fileRef.current?.click()}>Open a file</button>
               <button onClick={() => aboutDialog.current?.showModal()}>How it works</button>
@@ -536,11 +557,17 @@ export default function Studio() {
             <p>The whole song is drawn again from the start and saved as an MP4 video with its sound, exactly as long as the song. It uses the design you are watching.</p>
             <label>Shape
               <select value={shape} onChange={(e) => setShape(e.target.value as Shape)}>
-                <option value="landscape">Wide, 16:9</option>
-                <option value="portrait">Tall, 9:16</option>
-                <option value="square">Square</option>
+                <option value="landscape">Wide 16:9, YouTube and screens</option>
+                <option value="portrait">Tall 9:16, Reels, Shorts, TikTok</option>
+                <option value="square">Square 1:1, feed posts</option>
               </select>
             </label>
+            {shape === 'portrait' && (
+              <p className="note">
+                {size === 1080 ? '1080 × 1920, the size Reels, Shorts and TikTok expect.' : `${size} × ${even((size * 16) / 9)}. Reels, Shorts and TikTok expect 1080 × 1920.`}
+                {song && song.analysis.duration > SHORTS_LIMIT && ` This song is ${clock(song.analysis.duration)}; Reels and Shorts take up to 3:00.`}
+              </p>
+            )}
             <label>Sharpness
               <select value={size} onChange={(e) => setSize(Number(e.target.value))}>
                 <option value={540}>540p, small file</option>
