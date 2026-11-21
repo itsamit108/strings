@@ -25,37 +25,51 @@ npm run test:shaders   # needs glslangValidator on the PATH
 
 ## What you see, and where it comes from
 
-Both designs show the last four seconds of the song. Nothing moves on its own: every height,
-brightness, shape and colour is a measurement of the sound.
+Nothing moves on its own: every line, colour and motion is a measurement of the sound.
 
-### Ribbons
+### The picture changes with the song
 
-The middle of the screen is now. The sound travels out to both sides; the edges are four seconds ago.
+The song is split where the music changes, using Foote's audio novelty (ICME 2000): half-second blocks
+described by their notes (chroma), pitch-range levels, loudness, onsets, timbral brightness and the share of
+energy in the voice range are compared with every other block, and a Gaussian checkerboard kernel slid along
+that self-similarity matrix scores how different what follows is from what came before. Peaks are the
+boundaries (at least 8 s apart; parts longer than 32 s are cut again at their own strongest change). Each
+part gets the design that best shows what it does, scored against the rest of the same song, never the same
+design twice in a row; designs cross-fade over about four beats. Code: `lib/analysis/sections.ts`.
 
-| On screen | Measured from the sound |
-| --- | --- |
-| Four ribbons, bass at the bottom | The spectrum split into pitch ranges (40 Hz to 10 kHz, equal steps in pitch) |
-| How high a ribbon rises at a point | How loud that pitch range was at that moment |
-| Long waves below, short waves above | Wavelength follows pitch |
-| The two edges of a ribbon | Two neighbouring pitch ranges; twenty lines are strung between them |
-| How fast the waves travel | Loudness |
-| Overall brightness, and a flash | Loudness, and onsets (hits) |
-| Palette | The key of the song, leaning toward the notes sounding now |
+| Design | Physics | Chosen when |
+| --- | --- | --- |
+| Plate | Chladni figure: sand on the nodal lines of a square plate, mode cos(nπx)cos(mπy) − cos(mπx)cos(nπy). Each note drives the mode whose frequency (∝ n² + m²) matches it; the notes sounding are summed. Hits throw the sand. | one note dominates and holds |
+| Two-note figure | Lissajous / harmonograph: the two strongest notes drive x and y at their just ratio (fifth 3:2, third 5:4…). Equal temperament is slightly off that ratio, so the figure turns at exactly the beat frequency. | two notes sound together, few hits |
+| Ripple tank | Two point sources, one per strongest note; one medium, so wavelength ∝ 1/frequency; amplitude ∝ 1/√r; crests of the summed wave. | two notes, weight in the bass |
+| Membrane | Round drum skin: modes J_n(j_n1·r)·cos(n(θ − φ)), mode n driven by pitch range n; the lines are contours of the displaced skin. | energy in the voice range |
+| Rings | A ring leaves the centre every half beat and keeps the loudness, hits and notes of its moment. | many onsets |
+| Ribbons | Pitch ranges as ribbons; the middle is now, the edges four seconds ago. | energy across the whole spectrum |
 
-### Rings
+`?design=plate` (or `figure`, `ripples`, `membrane`, `rings`, `ribbons`) shows one design on its own, for checking.
 
-A ring leaves the centre twice every beat and travels outward, so the centre is now.
+### Colour
 
-| On screen | Measured from the sound |
-| --- | --- |
-| How often a ring leaves | Tempo |
-| Brightness of a ring | Loudness when it left |
-| A bold ring | An onset (a hit) when it left |
-| Colour of a ring | The strongest notes when it left (each note has its own hue, in rainbow order from C to B) |
-| Shape of a ring | The twelve notes sit around the circle (circle of fifths); the ring bulges toward the notes that were sounding |
+- Hue: a note's frequency raised by octaves (×2, about 40 times) into the octave of visible light,
+  400–800 THz, then the colour of that wavelength (CIE 1931 fit of Wyman et al. 2013). The gap past violet
+  is closed with the purples, as on Newton's circle. C green, D blue, E violet, G red, A orange.
+- Louder → more saturated (Anikin & Johansson 2019); higher → lighter (Marks 1974); brighter timbre
+  (spectral centroid) → lighter (Schubert & Wolfe 2006); fast and major → lighter, more vivid, yellower;
+  slow and minor → darker, bluer (Palmer, Schloss et al., PNAS 2013).
+- Colours sit near each hue's most vivid in-gamut point (OKLCH), never clipped.
 
-Code: measurements in `lib/analysis/dsp.ts` and `finalize.ts`; drawing in `lib/render/shaders.ts`
-and `renderer.ts`.
+### Sky
+
+Same song, same sky (seeded by the song's fingerprint). Star colour is blackbody temperature, shifted hotter
+for brighter-sounding songs (spectral centroid ↔ colour temperature); busier music has more stars; treble sets
+the twinkle; bass lights the nebula, whose colour follows the notes; the clouds flow and the sky turns with
+tempo and loudness; each clear onset sends a faint wave front out from the centre.
+
+### Title and artist
+
+Read from the file's tags (ID3, MP4, Vorbis, FLAC, RIFF; `music-metadata`), else from a file name like
+"Artist - Title". "Edit", or a click on the title while it shows on the picture, changes them. They rise into
+the picture over the first seconds and fade by eight seconds, in the exported video too.
 
 ### How the measurements are made
 

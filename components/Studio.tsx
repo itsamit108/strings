@@ -8,7 +8,9 @@ import { DEMO_TITLE } from '@/lib/demo/synth';
 import { ExportUnsupportedError, exportOffline, offlineExportAvailable } from '@/lib/export/offline';
 import { exportRealtime, realtimeExportAvailable } from '@/lib/export/realtime';
 import { toCss } from '@/lib/render/color';
-import { PlateRenderer, type Scene } from '@/lib/render/renderer';
+import { PlateRenderer } from '@/lib/render/renderer';
+import { DESIGN_NAMES, DESIGNS, type Design } from '@/lib/analysis/sections';
+import { readSongInfo } from '@/lib/audio/tags';
 import { NOTE_HUES, vivid } from '@/lib/render/lightmusic';
 
 type Phase = 'idle' | 'loading' | 'ready';
@@ -23,11 +25,13 @@ type ExportState =
   | { stage: 'done'; url: string | null; name: string }
   | { stage: 'error'; message: string };
 
-interface Song { title: string; analysis: Analysis; audio: AudioBuffer }
+interface Song { title: string; artist: string; showCaption: boolean; analysis: Analysis; audio: AudioBuffer }
 
 const MAX_PIXELS = 3840 * 2160;
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const even = (n: number) => Math.round(n / 2) * 2;
+/** "by Artist", or nothing when the artist is not known. */
+const byline = (s: { artist: string }) => (s.artist ? `by ${s.artist}` : '');
 
 function drawArc(canvas: HTMLCanvasElement, a: Analysis) {
   const dpr = window.devicePixelRatio || 1;
@@ -68,7 +72,8 @@ export default function Studio() {
   const fit = useRef<() => void>(() => {});
   const lastSeek = useRef(0);
   const phaseRef = useRef<Phase>('idle');
-  const sceneRef = useRef<Scene>('ribbons');
+  const designRef = useRef<HTMLElement>(null);
+  const infoDialog = useRef<HTMLDialogElement>(null);
   const frameRef = useRef<Frame>('screen');
 
   const [phase, setPhase] = useState<Phase>('idle');
@@ -85,7 +90,7 @@ export default function Studio() {
   const [shape, setShape] = useState<Shape>('landscape');
   const [size, setSize] = useState(1080);
   const [fps, setFps] = useState(60);
-  const [scene, setScene] = useState<Scene>('ribbons');
+  const [draft, setDraft] = useState({ title: '', artist: '', show: true });
   const [frame, setFrame] = useState<Frame>('screen');
 
   const chooseFrame = (next: Frame) => {
@@ -96,11 +101,17 @@ export default function Studio() {
     requestAnimationFrame(() => fit.current());
   };
 
-  const chooseScene = (next: Scene) => {
-    sceneRef.current = next;
-    if (renderer.current) renderer.current.scene = next;
-    setScene(next);
-  };
+  /** Puts the song's title and artist on the picture, once the fonts it uses are ready. */
+  const applyCaption = useCallback((s: Song) => {
+    const go = () => renderer.current?.setCaption(s.title, byline(s), s.showCaption);
+    go();
+    if (document.fonts) {
+      void Promise.all([
+        document.fonts.load('300 64px "Fraunces Variable"'),
+        document.fonts.load('450 24px "Instrument Sans Variable"'),
+      ]).then(go, go);
+    }
+  }, []);
 
   const getPlayer = useCallback(() => {
     if (!player.current) {
@@ -124,7 +135,9 @@ export default function Studio() {
     renderer.current = r;
     const s = songRef.current;
     if (s) r.setSong(s.analysis);
-    r.scene = sceneRef.current;
+    // For checking one design on its own: ?design=plate (ribbons, rings, plate, figure, ripples, membrane).
+    const forced = new URLSearchParams(location.search).get('design') as Design | null;
+    if (forced && DESIGNS.includes(forced)) r.force = forced;
 
     fit.current = () => {
       if (offline.current) return;
@@ -170,6 +183,8 @@ export default function Studio() {
         if (headRef.current) headRef.current.style.left = `${f}%`;
         if (nowRef.current) nowRef.current.textContent = clock(t);
         if (sliderRef.current) sliderRef.current.setAttribute('aria-valuenow', String(Math.round(t)));
+        const name = DESIGN_NAMES[r.current];
+        if (designRef.current && designRef.current.textContent !== name) designRef.current.textContent = name;
       }
     };
     raf = requestAnimationFrame(loop);
@@ -184,20 +199,21 @@ export default function Studio() {
   useEffect(() => () => { player.current?.dispose(); player.current = null; }, []);
 
   // ---- loading a song -----------------------------------------------------
-  const adoptBuffer = useCallback(async (audio: AudioBuffer, title: string) => {
+  const adoptBuffer = useCallback(async (audio: AudioBuffer, title: string, artist: string) => {
     setStatus('Measuring the sound');
     setProgress(0);
     const analysis = await analyzeAudio(audio, setProgress);
-    const s: Song = { title, analysis, audio };
+    const s: Song = { title, artist, showCaption: true, analysis, audio };
     songRef.current = s;
     renderer.current?.setSong(analysis);
+    applyCaption(s);
     const p = getPlayer();
     p.load(audio);
     setSong(s);
     setPhase('ready');
     document.documentElement.style.setProperty('--song', toCss(vivid(0.84, NOTE_HUES[analysis.key.tonic], 0.7)));
     void p.play();
-  }, [getPlayer]);
+  }, [getPlayer, applyCaption]);
 
   const fail = useCallback((message: string) => {
     setError(message);
@@ -213,6 +229,7 @@ export default function Studio() {
     setStatus('Reading the file');
     setProgress(0);
     let audio: AudioBuffer;
+    const info = readSongInfo(file);
     try {
       audio = await p.decode(await file.arrayBuffer());
     } catch {
@@ -220,7 +237,8 @@ export default function Studio() {
       return;
     }
     try {
-      await adoptBuffer(audio, file.name.replace(/\.[^.]+$/, ''));
+      const { title, artist } = await info;
+      await adoptBuffer(audio, title, artist);
     } catch (e) {
       fail(`The sound could not be measured: ${(e as Error).message}`);
     }
@@ -239,7 +257,7 @@ export default function Studio() {
       const audio = p.ctx.createBuffer(2, left.length, 44100);
       audio.getChannelData(0).set(left);
       audio.getChannelData(1).set(right);
-      await adoptBuffer(audio, DEMO_TITLE);
+      await adoptBuffer(audio, DEMO_TITLE, 'Strings');
     } catch (e) {
       fail(`The demo could not start: ${(e as Error).message}`);
     }
@@ -275,10 +293,30 @@ export default function Studio() {
 
   useEffect(() => {
     if (!song || !('mediaSession' in navigator)) return;
-    navigator.mediaSession.metadata = new MediaMetadata({ title: song.title, artist: 'Strings' });
+    navigator.mediaSession.metadata = new MediaMetadata({ title: song.title, artist: song.artist || 'Strings' });
     navigator.mediaSession.setActionHandler('play', () => void player.current?.play());
     navigator.mediaSession.setActionHandler('pause', () => player.current?.pause());
   }, [song]);
+
+  const openInfo = () => {
+    const s = songRef.current;
+    if (!s) return;
+    setDraft({ title: s.title, artist: s.artist, show: s.showCaption });
+    infoDialog.current?.showModal();
+  };
+
+  /** Clicking the title shown on the picture opens it for editing. */
+  const onCaption = (e: React.PointerEvent<HTMLCanvasElement>, click: boolean) => {
+    const r = renderer.current, c = e.currentTarget;
+    if (!r || !songRef.current) return;
+    const box = c.getBoundingClientRect();
+    const x = (e.clientX - box.left) / box.width, y = (e.clientY - box.top) / box.height;
+    const b = r.captionBox;
+    const pad = 0.02;
+    const over = r.captionAlpha > 0.25 && x > b.x0 - pad && x < b.x1 + pad && y > b.y0 - pad && y < b.y1 + pad;
+    c.style.cursor = over ? 'text' : '';
+    if (over && click) openInfo();
+  };
 
   const toggle = useCallback(() => {
     const p = player.current;
@@ -360,7 +398,7 @@ export default function Studio() {
     const long = even((size * 16) / 9);
     const width = shape === 'landscape' ? long : size;
     const height = shape === 'portrait' ? long : size;
-    const base = s.title.replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'strings';
+    const base = (s.artist ? `${s.artist} - ${s.title}` : s.title).replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'strings';
     const controller = new AbortController();
     abort.current = controller;
     const finish = (blob: Blob | null, name: string) => {
@@ -440,7 +478,14 @@ export default function Studio() {
         if (f) void openFile(f);
       }}
     >
-      <canvas ref={canvasRef} className="plate" aria-label="Waves of coloured light, shaped by the music" role="img" />
+      <canvas
+        ref={canvasRef}
+        className="plate"
+        aria-label="Light shaped by the music"
+        role="img"
+        onPointerMove={(e) => onCaption(e, false)}
+        onPointerUp={(e) => onCaption(e, true)}
+      />
       <input
         ref={fileRef}
         type="file"
@@ -480,10 +525,6 @@ export default function Studio() {
             <span className="mark">Strings</span>
             <nav className="tools">
               <button onClick={openExport}>Export video</button>
-              <span className="designs" role="group" aria-label="Design">
-                <button aria-pressed={scene === 'ribbons'} onClick={() => chooseScene('ribbons')}>Ribbons</button>
-                <button aria-pressed={scene === 'rings'} onClick={() => chooseScene('rings')}>Rings</button>
-              </span>
               <span className="designs" role="group" aria-label="Frame">
                 <button aria-pressed={frame === 'screen'} onClick={() => chooseFrame('screen')} title="Fill the screen">Screen</button>
                 <button aria-pressed={frame === 'tall'} onClick={() => chooseFrame('tall')} title="Phone frame for Reels, Shorts and TikTok">9:16</button>
@@ -506,10 +547,17 @@ export default function Studio() {
           <footer className="bar chrome">
             {error && <p className="error" role="alert">{error}</p>}
             <div className="meta">
-              <h2>{song.title}</h2>
+              <div className="who" key={`${song.title}\u0000${song.artist}`}>
+                <h2>{song.title}</h2>
+                {byline(song)
+                  ? <p className="artist">{byline(song)}</p>
+                  : <button className="edit" onClick={openInfo}>Add artist</button>}
+                <button className="edit" onClick={openInfo} aria-label="Change the title and artist">Edit</button>
+              </div>
               <dl>
                 <div><dt>Key</dt><dd>{a.key.name}</dd></div>
                 <div><dt>Tempo</dt><dd>{Math.round(a.bpm)} BPM</dd></div>
+                <div><dt>Now</dt><dd ref={designRef} className="design">{DESIGN_NAMES[renderer.current?.current ?? 'ribbons']}</dd></div>
                 <div><dt>Figure</dt><dd>{a.fingerprint.slice(0, 4)} {a.fingerprint.slice(4, 8)}</dd></div>
               </dl>
             </div>
@@ -550,6 +598,41 @@ export default function Studio() {
       )}
 
       {dragging && <div className="drop">Drop the song to play it</div>}
+
+      <dialog ref={infoDialog} className="info">
+        <form
+          method="dialog"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const s = songRef.current;
+            if (s) {
+              const next = { ...s, title: draft.title.trim() || s.title, artist: draft.artist.trim(), showCaption: draft.show };
+              songRef.current = next;
+              setSong(next);
+              applyCaption(next);
+            }
+            infoDialog.current?.close();
+          }}
+        >
+          <h3>Song</h3>
+          <p>Read from the file where it says. Change or add anything; it is shown at the start of the picture and of the video.</p>
+          <label>Song or sound name
+            <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} autoComplete="off" />
+          </label>
+          <label>Artist
+            <input value={draft.artist} onChange={(e) => setDraft({ ...draft, artist: e.target.value })} autoComplete="off" />
+          </label>
+
+          <label className="check">
+            <input type="checkbox" checked={draft.show} onChange={(e) => setDraft({ ...draft, show: e.target.checked })} />
+            Show the title and artist on the picture
+          </label>
+          <div className="actions">
+            <button type="submit" className="solid">Save</button>
+            <button type="button" className="outline" onClick={() => infoDialog.current?.close()}>Cancel</button>
+          </div>
+        </form>
+      </dialog>
 
       <dialog ref={exportDialog} onClose={() => { abort.current?.abort(); setExp(null); }}>
         {exp?.stage === 'options' && (
@@ -627,26 +710,48 @@ export default function Studio() {
 
       <dialog ref={aboutDialog} className="about">
         <h3>How it works</h3>
-        <h4>Ribbons</h4>
         <p>
-          The middle of the screen is now. The sound then travels out to both sides, and the edges are four seconds
-          ago. Each ribbon is one part of the sound, with bass at the bottom and the highest sounds at the top.
+          Nothing here moves on its own. The song is measured first (its notes, the loudness of each pitch range,
+          hits, tempo, key and how bright it sounds), and every line and colour comes from those measurements.
         </p>
+        <h4>The picture changes with the song</h4>
         <p>
-          A ribbon rises where its part of the sound was loud and lies flat where it was silent. Bass makes long,
-          slow waves and high sounds make short, quick ones. The waves travel faster when the music is loud.
+          The song is split where the music changes: each moment is compared with every other, and a boundary is
+          placed where what follows differs most from what came before, a voice coming in included. Each part gets
+          the picture that fits what it does, and the pictures cross-fade at the boundary.
         </p>
-        <h4>Rings</h4>
+        <h4>Plate</h4>
         <p>
-          A ring leaves the centre twice every beat and travels outward. Each ring keeps the moment it left:
-          brighter if the music was loud, bolder if there was a hit like a drum, and coloured by the notes.
+          Sand on a vibrating plate gathers where the plate stands still. Each note shakes the plate in its own
+          pattern, matched to its frequency; the notes sounding now are added together. A hit throws the sand up.
         </p>
+        <h4>Two-note figure</h4>
         <p>
-          The twelve notes sit around the circle like hours on a clock. A ring bulges toward the notes that were
-          sounding, so a chord gives a ring its shape.
+          Two notes driving the two axes of an oscilloscope. A fifth draws a 3:2 figure, a third 5:4. Played notes are
+          slightly off those ratios, so the figure slowly turns, at exactly that difference.
         </p>
-        <h4>Colour</h4>
-        <p>The key of the song picks the colours, so every song has its own palette.</p>
+        <h4>Ripple tank</h4>
+        <p>
+          The two strongest notes as two wave sources in water. Higher notes make shorter waves. Where crests meet,
+          they add up; where a crest meets a trough, they cancel.
+        </p>
+        <h4>Membrane</h4>
+        <p>
+          A round drum skin. Each part of the spectrum drives one way the skin can vibrate, from broad bulges (bass)
+          to many small ripples (treble). The lines are rings of the skin, pushed out where it bulges.
+        </p>
+        <h4>Ribbons and Rings</h4>
+        <p>
+          Ribbons: the middle is now and the edges are four seconds ago; each ribbon is a pitch range, bass at the
+          bottom. Rings: one leaves the centre every half beat, keeping the loudness, hits and notes of its moment.
+        </p>
+        <h4>Colour and sky</h4>
+        <p>
+          A note&apos;s colour is its frequency raised by about forty octaves into visible light: C green, D blue,
+          E violet, G red, A orange. Louder is more vivid, higher is lighter. Stars are coloured like real stars, by
+          temperature: brighter-sounding songs have hotter, bluer stars. Treble makes them twinkle, bass lights the
+          nebula, and every hit sends a faint wave across the sky.
+        </p>
         <div className="actions"><button className="outline" onClick={() => aboutDialog.current?.close()}>Close</button></div>
       </dialog>
     </div>

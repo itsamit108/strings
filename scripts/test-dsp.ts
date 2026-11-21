@@ -25,3 +25,14 @@ for (const t of [2, 8, 15, 25, 36, 45, 52, 60, 68]) {
   s.at(t);
   console.log(`t=${t} loud=${s.loud.toFixed(2)} onset=${s.onset.toFixed(2)} bands=${Array.from(s.bands).map((v) => v.toFixed(2)).join(' ')}`);
 }
+
+// Sections: where the music changes, and the design chosen for each.
+import('../lib/analysis/sections').then(({ planSections, DESIGN_NAMES }) => {
+  t0 = Date.now();
+  const plan = planSections(a);
+  console.log('sections ms', Date.now() - t0);
+  for (const s of plan) {
+    const st = Object.entries(s.stats).map(([k, v]) => `${k}=${v.toFixed(2)}`).join(' ');
+    console.log(`${s.start.toFixed(1).padStart(5)}–${s.end.toFixed(1).padStart(5)}s  ${DESIGN_NAMES[s.design].padEnd(16)} ${st}`);
+  }
+});

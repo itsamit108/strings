@@ -120,11 +120,104 @@ uniform sampler2D uAccum;
 uniform float uExposure;
 uniform vec3 uBg;
 uniform vec2 uInvRes;
+// sky
+uniform float uTime;
+uniform float uUnit;        // min(width, height) in pixels
+uniform float uSeed;        // 0..1000, from the song's fingerprint: the same song gives the same sky
+uniform float uStarDensity; // share of sky cells holding a star (busier music, more stars)
+uniform float uWarm;        // 0 = cool timbre → warm orange stars, 1 = bright timbre → hot blue-white stars
+uniform float uTwinkle;     // twinkle depth, from the treble
+uniform float uNebula;      // nebula brightness, from the bass
+uniform vec3 uNebA;
+uniform vec3 uNebB;
+uniform vec2 uBandDir;      // direction of the milky band across the sky
+uniform vec2 uFlow;         // how far the clouds have flowed (faster with tempo and loudness)
+uniform float uRot;         // how far the sky has turned (with tempo)
+uniform vec4 uHits[6];      // recent hits: (seconds since, strength, -, -)
+uniform float uWaveSpeed;   // pixels per second a hit's wave front travels
+// caption (title and artist)
+uniform sampler2D uCaption;
+uniform float uCaptionAlpha;
+uniform float uCaptionLift;
 out vec4 o;
 float hash12(vec2 p) {
   vec3 p3 = fract(vec3(p.xyx) * 0.1031);
   p3 += dot(p3, p3.yzx + 33.33);
   return fract((p3.x + p3.y) * p3.z);
+}
+vec4 hash42(vec2 p) {
+  vec4 p4 = fract(vec4(p.xyxy) * vec4(0.1031, 0.103, 0.0973, 0.1099));
+  p4 += dot(p4, p4.wzxy + 33.33);
+  return fract((p4.xxyz + p4.yzzw) * p4.zywx);
+}
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), f.x), mix(hash12(i + vec2(0.0, 1.0)), hash12(i + 1.0), f.x), f.y);
+}
+float fbm(vec2 p) {
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 5; i++) { s += a * vnoise(p); p = p * 2.03 + 17.1; a *= 0.5; }
+  return s;
+}
+// Colour of a blackbody (a star) at a temperature in kelvin, as linear sRGB (after Tanner Helland's fit).
+vec3 kelvin(float k) {
+  float t = k / 100.0;
+  vec3 c;
+  c.r = t <= 66.0 ? 1.0 : clamp(1.292936 * pow(t - 60.0, -0.1332047592), 0.0, 1.0);
+  c.g = t <= 66.0 ? clamp(0.39008157 * log(t) - 0.63184144, 0.0, 1.0) : clamp(1.129890861 * pow(t - 60.0, -0.0755148492), 0.0, 1.0);
+  c.b = t >= 66.0 ? 1.0 : (t <= 19.0 ? 0.0 : clamp(0.54320678 * log(t - 10.0) - 1.19625408, 0.0, 1.0));
+  return pow(c, vec3(2.2));
+}
+// One layer of stars on a jittered grid. Most stars are faint; a few are bright (a steep power law, like real skies).
+// A hit sends a pressure wave out from the centre; the sky brightens briefly as its front passes.
+float hitWave(vec2 px) {
+  float r = length(px - 0.5 / uInvRes);
+  float sum = 0.0;
+  for (int i = 0; i < 6; i++) {
+    float age = uHits[i].x, str = uHits[i].y;
+    if (str <= 0.0) continue;
+    float front = age * uWaveSpeed;
+    float d = (r - front) / (0.05 * uUnit);
+    sum += str * exp(-d * d) * exp(-age / 2.2);
+  }
+  return sum;
+}
+vec2 turn(vec2 px, float a) {
+  vec2 c = 0.5 / uInvRes;
+  float s = sin(a), co = cos(a);
+  return c + mat2(co, s, -s, co) * (px - c);
+}
+vec3 stars(vec2 px, float cell, float density, float gain, float band) {
+  vec2 c = floor(px / cell);
+  vec4 h = hash42(c + uSeed);
+  if (h.x > density * (1.0 + 1.5 * band)) return vec3(0.0);
+  vec4 g = hash42(c * 1.7 + uSeed + 31.0);
+  vec2 pos = (c + 0.2 + 0.6 * h.yz) * cell;
+  float mag = pow(h.w, 5.0);
+  float r = (0.55 + 1.1 * mag) * uUnit / 1000.0;
+  float d = length(px - pos);
+  // The glow ends well inside the star's own cell, so no cell edge ever shows.
+  float core = exp(-d * d / (r * r)) + 0.04 * mag * exp(-d / (6.0 * r)) * (1.0 - smoothstep(0.08 * cell, 0.18 * cell, d));
+  // Hotter or cooler stars depending on how bright the sound is (spectral centroid ↔ colour temperature).
+  float temp = mix(3200.0, 13000.0, clamp(g.x * 0.75 + (uWarm - 0.5) * 0.8 + 0.12, 0.0, 1.0));
+  // Scintillation: each star flickers at its own rate, deeper when there is more treble.
+  float tw = 1.0 + uTwinkle * (0.55 * sin(uTime * (2.0 + 6.0 * g.y) + 6.2832 * g.z) + 0.3 * sin(uTime * (7.0 + 9.0 * g.w) + 3.0 * g.y));
+  return kelvin(temp) * core * (0.08 + 0.9 * mag) * gain * max(tw, 0.0) * (1.0 + 3.0 * hitWave(pos));
+}
+vec3 sky(vec2 px) {
+  vec2 q = px / uUnit;
+  // A faint milky band crossing the sky, its clouds drifting very slowly.
+  vec2 n = vec2(-uBandDir.y, uBandDir.x);
+  float across = dot(q - 0.5 / uInvRes / uUnit, n);
+  float band = exp(-across * across / 0.09);
+  vec2 drift = uFlow;
+  float cloud = fbm(q * 2.4 + uSeed * 0.37 + drift);
+  float tint = fbm(q * 1.3 - uSeed * 0.21 - drift);
+  vec3 neb = mix(uNebA, uNebB, smoothstep(0.3, 0.7, tint)) * smoothstep(0.42, 0.85, cloud) * band * uNebula * (1.0 + 1.5 * hitWave(px));
+  // Two depths of stars turning at different rates (near ones faster), so the sky has depth.
+  vec3 s = stars(turn(px, uRot), uUnit / 14.0, uStarDensity, 0.9, band) + stars(turn(px, uRot * 0.55) + 911.0, uUnit / 34.0, uStarDensity * 0.8, 0.45, band);
+  return neb + s;
 }
 void main() {
   vec2 uv = gl_FragCoord.xy * uInvRes;
@@ -143,7 +236,194 @@ void main() {
   mapped = mix(mapped, vec3(1.0), 0.15 * smoothstep(4.0, 12.0, m));
   float v = length(uv - 0.5);
   vec3 bg = uBg * (1.0 - 0.75 * smoothstep(0.15, 0.85, v));
+  // The sky sits behind the light and fades where the light is strong.
+  bg += sky(gl_FragCoord.xy) * (1.0 - min(1.0, m));
   vec3 col = pow(clamp(bg + mapped, 0.0, 1.0), vec3(1.0 / 2.2));
   col += (hash12(gl_FragCoord.xy) - 0.5) / 255.0;
+  if (uCaptionAlpha > 0.001) {
+    vec4 cap = texture(uCaption, vec2(uv.x, 1.0 - uv.y + uCaptionLift));
+    col = mix(col, cap.rgb, cap.a * uCaptionAlpha);
+  }
   o = vec4(col, 1.0);
+}`;
+
+/**
+ * PLATE: a Chladni figure. A square plate driven at a frequency vibrates in a standing wave; sand
+ * gathers on its nodal lines, where the plate does not move. Each note excites its own mode (n, m),
+ * chosen so that the mode's frequency, which grows as n² + m², matches the note's frequency.
+ * The modes of the notes sounding are added together, weighted by how strongly each note sounds.
+ * Mode shape: cos(nπx)cos(mπy) − cos(mπx)cos(nπy) (the classic square-plate approximation).
+ */
+export const PLATE_FS = /* glsl */ `#version 300 es
+precision highp float;
+uniform vec2 uCenterPx;
+uniform float uHalf;          // half the plate's side, in pixels
+uniform vec2 uModes[12];      // (n, m) for each note
+uniform float uWeight[12];    // how strongly each note sounds now
+uniform vec3 uCol[12];        // each note's light
+uniform float uWidthPx;
+uniform float uIntensity;
+uniform float uJump;          // sand thrown up by a hit
+uniform float uTime;
+out vec4 o;
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+void main() {
+  vec2 q = (gl_FragCoord.xy - uCenterPx) / uHalf;
+  float edge = max(abs(q.x), abs(q.y));
+  if (edge > 1.02) { o = vec4(0.0); return; }
+  vec2 x = (q * 0.5 + 0.5) * 3.14159265;
+  float u = 0.0, sum = 0.0;
+  vec3 col = vec3(0.0);
+  for (int i = 0; i < 12; i++) {
+    float w = uWeight[i];
+    if (w < 0.004) continue;
+    vec2 nm = uModes[i];
+    float ui = cos(nm.x * x.x) * cos(nm.y * x.y) - cos(nm.y * x.x) * cos(nm.x * x.y);
+    u += w * ui;
+    col += uCol[i] * w * (0.25 + abs(ui));
+    sum += w * (0.25 + abs(ui));
+  }
+  col /= max(sum, 1e-4);
+  float g = length(vec2(dFdx(u), dFdy(u)));
+  float dist = abs(u) / max(g, 1e-5);            // pixels to the nearest nodal line
+  // Sand: grains, not a smooth line. A hit throws grains off the lines for a moment.
+  float grain = hash12(floor(gl_FragCoord.xy / max(1.0, uWidthPx * 0.9)));
+  float spread = uWidthPx * (1.6 + 5.0 * uJump);
+  float onLine = exp(-dist * dist / (spread * spread));
+  float sand = onLine * step(0.35 + 0.3 * uJump, grain) * (0.75 + 0.5 * grain);
+  float loose = 0.03 * step(0.985, grain) * (1.0 + 4.0 * uJump);
+  float rim = exp(-pow((1.0 - edge) * uHalf / (uWidthPx * 1.5), 2.0)) * 0.12;
+  float inside = 1.0 - smoothstep(0.985, 1.02, edge);
+  o = vec4(col * (sand + loose + rim) * inside * uIntensity, 1.0);
+}`;
+
+/**
+ * RIPPLES: a ripple tank. Two sources, one for each of the two strongest notes, send out circular
+ * waves. In one medium all waves travel at the same speed, so wavelength is inversely proportional to
+ * frequency. Where crests meet they add, where a crest meets a trough they cancel: the bright lines are
+ * the crests of the summed wave. Equal notes give still fringes; different notes give moving ones.
+ * Amplitude falls as 1/√r, as for circular waves on a surface.
+ */
+export const RIPPLES_FS = /* glsl */ `#version 300 es
+precision highp float;
+uniform vec2 uSrc[2];
+uniform float uK[2];       // wavenumber, radians per pixel
+uniform float uPhase[2];   // ω·t
+uniform float uAmp[2];
+uniform vec3 uCol[2];
+uniform float uUnit;
+uniform float uWidthPx;
+uniform float uIntensity;
+out vec4 o;
+void main() {
+  vec2 p = gl_FragCoord.xy;
+  float h = 0.0, total = 0.0;
+  vec3 col = vec3(0.0);
+  float wsum = 0.0;
+  for (int i = 0; i < 2; i++) {
+    float r = length(p - uSrc[i]);
+    float fall = uAmp[i] / sqrt(1.0 + r / (0.08 * uUnit));
+    h += fall * cos(uK[i] * r - uPhase[i]);
+    total += fall;
+    col += uCol[i] * fall;
+    wsum += fall;
+  }
+  col /= max(wsum, 1e-5);
+  float c = h / max(total, 1e-5);                 // -1..1
+  float g = length(vec2(dFdx(c), dFdy(c)));
+  // Crest lines: where the summed wave is near its own maximum.
+  float crest = max(0.0, c);
+  float line = pow(crest, 14.0) + 0.9 * exp(-pow((1.0 - crest) / max(g * uWidthPx * 1.5, 1e-4), 2.0)) * crest;
+  float fadeOut = 1.0 - smoothstep(0.55, 0.75, length((p - 0.5 * (uSrc[0] + uSrc[1])) / uUnit));
+  o = vec4(col * (line + 0.03 * crest) * fadeOut * uIntensity, 1.0);
+}`;
+
+/**
+ * MEMBRANE: a round drum skin. Its modes are Bessel functions J_n(j_n1·r)·cos(n(θ − φ)), where j_n1 is
+ * the first zero of J_n, so the rim never moves. Mode n is driven by pitch range n (bass drives the
+ * broad, few-lobed modes; treble the many-lobed ones). The lines are contours of the displaced skin:
+ * nested outlines that bulge where the skin is pushed out.
+ */
+export const MEMBRANE_FS = /* glsl */ `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uBessel;     // row n: J_n(j_n1 r) / max, r = 0..1
+uniform vec2 uCenterPx;
+uniform float uRadius;
+uniform float uAmp[9];
+uniform float uTurn[9];        // orientation of each mode
+uniform vec3 uColIn;
+uniform vec3 uColOut;
+uniform float uLines;
+uniform float uWidthPx;
+uniform float uIntensity;
+out vec4 o;
+void main() {
+  vec2 p = (gl_FragCoord.xy - uCenterPx) / uRadius;
+  float r = length(p);
+  if (r > 1.25) { o = vec4(0.0); return; }
+  float th = atan(p.y, p.x);
+  float w = 0.0;
+  for (int n = 0; n < 9; n++) {
+    float J = texture(uBessel, vec2(min(r, 1.0), (float(n) + 0.5) / 9.0)).r;
+    w += uAmp[n] * J * cos(float(n) * (th - uTurn[n]));
+  }
+  // Each outline is a ring of the skin at rest, moved outward by the displacement.
+  float R = r - 0.22 * w;
+  float t = R * uLines;
+  float g = length(vec2(dFdx(t), dFdy(t)));
+  float f = abs(fract(t + 0.5) - 0.5);
+  float dist = f / max(g, 1e-4);
+  float line = exp(-dist * dist / (uWidthPx * uWidthPx));
+  float inside = 1.0 - smoothstep(0.92, 1.0, R);
+  float k = clamp(R, 0.0, 1.0);
+  vec3 col = mix(uColIn, uColOut, k);
+  o = vec4(col * line * inside * step(0.04, R) * (0.55 + 0.45 * k) * uIntensity, 1.0);
+}`;
+
+/**
+ * FIGURE: what an oscilloscope draws when two notes drive its two axes (a Lissajous figure), traced
+ * by a decaying pendulum pair (a harmonograph). The figure's shape is the notes' frequency ratio, taken
+ * as the nearest simple ratio (a fifth is 3:2). The notes actually played in equal temperament are a
+ * little off that ratio, so the figure slowly turns, at exactly the rate of the mismatch.
+ */
+export const FIGURE_VS = /* glsl */ `#version 300 es
+precision highp float;
+uniform vec2 uCenterPx;
+uniform vec2 uRes;
+uniform float uAmp;
+uniform float uP;
+uniform float uQ;
+uniform float uPhase;
+uniform float uDamp;
+uniform float uLoops;
+uniform float uPoints;
+uniform float uPointPx;
+out float vT;
+void main() {
+  float i = float(gl_VertexID);
+  float t = i / uPoints;
+  float s = t * 6.2831853 * uLoops;
+  float decay = exp(-uDamp * s);
+  vec2 xy = uAmp * decay * vec2(sin(uQ * s + uPhase), sin(uP * s));
+  vec2 px = uCenterPx + xy;
+  gl_Position = vec4(px / uRes * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = uPointPx;
+  vT = t;
+}`;
+export const FIGURE_FS = /* glsl */ `#version 300 es
+precision highp float;
+uniform vec3 uColA;
+uniform vec3 uColB;
+uniform float uIntensity;
+in float vT;
+out vec4 o;
+void main() {
+  vec2 d = gl_PointCoord * 2.0 - 1.0;
+  float a = exp(-dot(d, d) * 4.0);
+  o = vec4(mix(uColA, uColB, vT) * a * uIntensity, 1.0);
 }`;

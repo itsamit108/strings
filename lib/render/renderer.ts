@@ -9,9 +9,10 @@ import { BAND_COUNT } from '../analysis/types';
 import { FeatureSampler, fifthsAngle } from '../analysis/finalize';
 import { oklch } from './color';
 import { BLUE_HUE, chordTones, mixHue, NOTE_HUES, notesHue, valence, vivid, YELLOW_HUE } from './lightmusic';
+import { designsAt, planSections, type Design, type Section } from '../analysis/sections';
 import * as S from './shaders';
 
-export type Scene = 'ribbons' | 'rings';
+export type Scene = Design;
 
 /** Internal resolution steps, used only if the device cannot hold its frame rate. */
 const SCALES = [0.5, 0.67, 0.8, 1];
@@ -22,7 +23,60 @@ const SHAPE_H = 48;
 const RIBBON_CYCLES = [0.8, 1.15, 1.6, 2.2];
 const RIBBON_SPEED = [0.55, 0.75, 1.0, 1.3];
 
+/** First zero of J_n, n = 0..8: the rim of a drum skin stays still. */
+const BESSEL_ZEROS = [2.4048, 3.8317, 5.1356, 6.3802, 7.5883, 8.7715, 9.9361, 11.0864, 12.2251];
+const BESSEL_W = 256;
+/** J_n(j_n1 · r) for r = 0..1, each row scaled to a peak of 1. */
+const BESSEL = (() => {
+  const t = new Float32Array(BESSEL_W * 9);
+  const fact = [1];
+  for (let k = 1; k < 60; k++) fact[k] = fact[k - 1] * k;
+  const J = (n: number, x: number) => {
+    let s = 0;
+    for (let k = 0; k < 30; k++) s += ((k % 2 ? -1 : 1) * Math.pow(x / 2, 2 * k + n)) / (fact[k] * fact[k + n]);
+    return s;
+  };
+  for (let n = 0; n < 9; n++) {
+    let peak = 1e-9;
+    for (let i = 0; i < BESSEL_W; i++) {
+      const v = J(n, BESSEL_ZEROS[n] * (i / (BESSEL_W - 1)));
+      t[n * BESSEL_W + i] = v;
+      peak = Math.max(peak, Math.abs(v));
+    }
+    for (let i = 0; i < BESSEL_W; i++) t[n * BESSEL_W + i] /= peak;
+  }
+  return t;
+})();
+/** Plate modes (n, m), n < m; a mode's frequency grows as n² + m². */
+const PLATE_MODES = (() => {
+  const out: [number, number][] = [];
+  for (let m = 1; m <= 8; m++) for (let n = 0; n < m; n++) out.push([n, m]);
+  return out;
+})();
+/** The plate mode whose frequency matches a note `rel` semitones above the key note. */
+function plateMode(rel: number): [number, number] {
+  const target = 30 * Math.pow(2, rel / 12);
+  let best = PLATE_MODES[0], bestD = Infinity;
+  for (const nm of PLATE_MODES) {
+    const d = Math.abs(nm[0] ** 2 + nm[1] ** 2 - target) - 0.01 * nm[0];
+    if (d < bestD) { bestD = d; best = nm; }
+  }
+  return best;
+}
+/** Simplest whole-number ratio for each interval in semitones (just intonation), upper : lower. */
+const JUST: [number, number][] = [[1, 1], [16, 15], [9, 8], [6, 5], [5, 4], [4, 3], [45, 32], [3, 2], [8, 5], [5, 3], [9, 5], [15, 8]];
+const FIGURE_POINTS = 14000;
+
 type Uniforms = Record<string, WebGLUniformLocation | null>;
+interface DrawCtx {
+  W: number; H: number; unit: number; time: number; dt: number; ease: (tau: number) => number; level: number;
+  tonic: number; minor: boolean; mood: number; now: { hue: number; clarity: number };
+  cx: number; cy: number; order: number[];
+}
+const smooth01 = (e0: number, e1: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+};
 interface Program { p: WebGLProgram; u: Uniforms }
 
 function hash01(n: number): number {
@@ -33,7 +87,9 @@ function hash01(n: number): number {
 
 export class PlateRenderer {
   private gl!: WebGL2RenderingContext;
-  private prog!: Record<'ribbons' | 'rings' | 'fade' | 'present', Program>;
+  private prog!: Record<'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'figure' | 'fade' | 'present', Program>;
+  private besselTex!: WebGLTexture;
+  private captionTex!: WebGLTexture;
   private vao!: WebGLVertexArrayObject;
   private histTex!: WebGLTexture;
   private shapeTex!: WebGLTexture;
@@ -44,8 +100,17 @@ export class PlateRenderer {
   private askedH = 2;
   private scaleIndex = SCALES.length - 1;
 
-  /** which design to draw */
-  scene: Scene = 'ribbons';
+  /** when set, always draw this design (for testing); otherwise the song's sections decide */
+  force: Design | null = null;
+  /** the song's sections and the design chosen for each */
+  sections: Section[] = [];
+  /** the design most visible at the last frame */
+  current: Design = 'ribbons';
+  private caption = { title: '', artist: '', show: true };
+  /** where the caption sits (fractions of the picture) and how visible it is now, so it can be clicked to edit */
+  captionBox = { x0: 0, y0: 0, x1: 0, y1: 0 };
+  captionAlpha = 0;
+  private captionCanvas: HTMLCanvasElement | null = null;
   /** vertical shift of the picture's centre, as a fraction of the height (+ = up) */
   centerOffset = 0;
   /** keep the ribbons together in a narrow band (used behind the first screen's text) */
@@ -83,6 +148,25 @@ export class PlateRenderer {
   private brightness = 0.5;
   /** each ribbon's hue, drifting toward the notes sounding */
   private ribbonHue = new Float32Array(S.RIBBONS).fill(Number.NaN);
+  /** how strongly each note drives the plate, smoothed */
+  private plateW = new Float32Array(12);
+  /** pitch-range levels, smoothed */
+  private bandsNow = new Float32Array(BAND_COUNT);
+  private bassE = 0;
+  private trebleE = 0;
+  /** phases that run on with the music (kept, so nothing jumps when the notes change) */
+  private figurePhase = 0;
+  private ripplePhase = new Float32Array(2);
+  private membraneTurn = new Float32Array(9);
+  /** whole-song measurements for the sky */
+  private songBright = 0.5;
+  private songBusy = 0.05;
+  /** the sky's motion: cloud flow, turn, and the last few hits sending waves outward */
+  private skyFlow = [0, 0];
+  private skyRot = 0;
+  private hits = new Float32Array(12); // (time, strength) × 6
+  private hitNext = 0;
+  private lastHit = -1;
   private idleClock = 0;
 
   private dtSum = 0;
@@ -110,7 +194,7 @@ export class PlateRenderer {
     if (!gl.getExtension('EXT_color_buffer_float') && !gl.getExtension('EXT_color_buffer_half_float'))
       throw new Error('This device cannot draw high-range light, which the picture needs.');
 
-    const mk = (fs: string): Program => {
+    const mk = (fs: string, vs: string = S.FULLSCREEN_VS): Program => {
       const compile = (type: number, src: string) => {
         const sh = gl.createShader(type)!;
         gl.shaderSource(sh, src);
@@ -120,7 +204,7 @@ export class PlateRenderer {
         return sh;
       };
       const p = gl.createProgram()!;
-      gl.attachShader(p, compile(gl.VERTEX_SHADER, S.FULLSCREEN_VS));
+      gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
       gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
       gl.linkProgram(p);
       if (!gl.getProgramParameter(p, gl.LINK_STATUS))
@@ -133,7 +217,10 @@ export class PlateRenderer {
       }
       return { p, u };
     };
-    this.prog = { ribbons: mk(S.RIBBONS_FS), rings: mk(S.RINGS_FS), fade: mk(S.FADE_FS), present: mk(S.PRESENT_FS) };
+    this.prog = {
+      ribbons: mk(S.RIBBONS_FS), rings: mk(S.RINGS_FS), plate: mk(S.PLATE_FS), ripples: mk(S.RIPPLES_FS),
+      membrane: mk(S.MEMBRANE_FS), figure: mk(S.FIGURE_FS, S.FIGURE_VS), fade: mk(S.FADE_FS), present: mk(S.PRESENT_FS),
+    };
     this.vao = gl.createVertexArray()!;
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
@@ -151,6 +238,14 @@ export class PlateRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.shapeTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, SHAPE_W, SHAPE_H, 0, gl.RED, gl.FLOAT, this.shape);
     smooth(gl.REPEAT); // the angle wraps around the circle
+    this.besselTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.besselTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, BESSEL_W, 9, 0, gl.RED, gl.FLOAT, BESSEL);
+    smooth(gl.CLAMP_TO_EDGE);
+    this.captionTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.captionTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    smooth(gl.CLAMP_TO_EDGE);
 
     this.resize(this.askedW, this.askedH, true);
   }
@@ -162,6 +257,17 @@ export class PlateRenderer {
     this.energy = this.kick = 0;
     this.brightness = 0.5;
     this.ribbonHue.fill(Number.NaN);
+    this.plateW.fill(0);
+    this.bandsNow.fill(0);
+    this.bassE = this.trebleE = 0;
+    this.figurePhase = 0;
+    this.hits.fill(0);
+    this.hitNext = 0;
+    this.lastHit = -1;
+    this.skyFlow = [0, 0];
+    this.skyRot = 0;
+    this.ripplePhase.fill(0);
+    for (let n = 0; n < 9; n++) this.membraneTurn[n] = 2 * Math.PI * hash01((seed >>> 0) + 101 * n);
     if (this.accum && !this.lost) {
       const gl = this.gl;
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.accum.fbo);
@@ -201,6 +307,7 @@ export class PlateRenderer {
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     this.accum = { tex, fbo };
+    this.drawCaption();
   }
 
   setSong(analysis: Analysis | null) {
@@ -214,6 +321,71 @@ export class PlateRenderer {
         this.motion[i + 1] = this.motion[i] + (0.25 + 1.3 * analysis.loud[i]) * frameSeconds;
     }
     this.seed(analysis?.seed ?? 0x5eed);
+    this.sections = analysis ? planSections(analysis) : [];
+    if (analysis) {
+      let b = 0, o = 0;
+      for (let i = 0; i < analysis.totalFrames; i++) { b += analysis.bright[i]; o += analysis.onset[i]; }
+      this.songBright = b / Math.max(1, analysis.totalFrames);
+      this.songBusy = o / Math.max(1, analysis.totalFrames);
+    }
+  }
+
+  /** Title and artist, shown on the picture at the start of the song (and so in the exported video). */
+  setCaption(title: string, artist: string, show: boolean) {
+    this.caption = { title, artist, show };
+    this.drawCaption();
+  }
+
+  private drawCaption() {
+    if (this.lost || typeof document === 'undefined') return;
+    const W = this.width, H = this.height, gl = this.gl;
+    const { title, artist, show } = this.caption;
+    const c = this.captionCanvas ?? (this.captionCanvas = document.createElement('canvas'));
+    c.width = W; c.height = H;
+    const g = c.getContext('2d')!;
+    g.clearRect(0, 0, W, H);
+    this.captionBox = { x0: 0, y0: 0, x1: 0, y1: 0 };
+    if (show && (title || artist)) {
+      const unit = Math.min(W, H), tall = H > W;
+      const maxW = W * (tall ? 0.84 : 0.62);
+      const fit = (font: (px: number) => string, text: string, px: number) => {
+        let size = px;
+        g.font = font(size);
+        while (size > 8 && g.measureText(text).width > maxW) { size *= 0.94; g.font = font(size); }
+        return size;
+      };
+      const titleFont = (px: number) => `300 ${px}px "Fraunces Variable", "Iowan Old Style", Georgia, serif`;
+      const artistFont = (px: number) => `450 ${px}px "Instrument Sans Variable", system-ui, "Segoe UI", sans-serif`;
+      const tSize = title ? fit(titleFont, title, unit * (tall ? 0.08 : 0.064)) : 0;
+      const aSize = artist ? fit(artistFont, artist, unit * (tall ? 0.034 : 0.03)) : 0;
+      const x = tall ? W / 2 : W * 0.07;
+      const base = H * (tall ? 0.74 : 0.72);
+      g.textAlign = tall ? 'center' : 'left';
+      g.textBaseline = 'alphabetic';
+      g.shadowColor = 'rgba(0,0,0,0.6)';
+      g.shadowBlur = unit * 0.02;
+      if (title) {
+        g.font = titleFont(tSize);
+        g.fillStyle = 'rgba(244,239,229,0.96)';
+        g.fillText(title, x, base);
+      }
+      const aBase = base + (title ? tSize * 0.3 : 0) + aSize * 1.35;
+      if (artist) {
+        g.font = artistFont(aSize);
+        g.fillStyle = 'rgba(214,208,196,0.85)';
+        g.fillText(artist, x, aBase);
+      }
+      g.font = titleFont(tSize);
+      const wT = title ? g.measureText(title).width : 0;
+      g.font = artistFont(aSize);
+      const wA = artist ? g.measureText(artist).width : 0;
+      const w = Math.max(wT, wA), x0 = tall ? x - w / 2 : x;
+      const top = base - tSize, bottom = artist ? aBase + aSize * 0.4 : base + tSize * 0.3;
+      this.captionBox = { x0: x0 / W, x1: (x0 + w) / W, y0: top / H, y1: bottom / H };
+    }
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.captionTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
   }
 
   private motionAt(time: number): number {
@@ -338,7 +510,6 @@ export class PlateRenderer {
     const now = notesHue(this.chroma);
 
     const W = this.width, H = this.height, unit = Math.min(W, H);
-    const scene: Scene = a ? this.scene : 'ribbons';
     this.readHistory(time, keyColour);
 
     // ---- light buffer -----------------------------------------------------
@@ -354,55 +525,44 @@ export class PlateRenderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.blendFunc(gl.ONE, gl.ONE);
 
-    if (scene === 'ribbons') {
-      const p = this.prog.ribbons;
-      gl.useProgram(p.p);
-      gl.uniform1i(p.u.uHist, 1);
-      gl.uniform2f(p.u.uRes, W, H);
-      const tall = H > W && !this.compact;
-      const gap = tall ? 0.2 : this.compact ? 0.03 : 0.125;
-      const centres = new Float32Array(S.RIBBONS), cycles = new Float32Array(S.RIBBONS), phase = new Float32Array(S.RIBBONS);
-      const colA = new Float32Array(S.RIBBONS * 3), colB = new Float32Array(S.RIBBONS * 3);
-      const motion = this.motionAt(time);
-      const stretch = Math.sqrt(Math.min(1.6, Math.max(0.5, W / H)));
-      // Each ribbon is a note of the key's chord (root at the bottom, then fifth, third, seventh),
-      // coloured by that note's light, and drifting toward the notes sounding now.
-      const tones = chordTones(tonic, minor);
-      const lift = 0.07 * (this.brightness - 0.5) + 0.03 * mood + 0.06 * this.kick;
-      const sat = (0.8 + 0.2 * this.energy + 0.3 * this.kick) * (1 + 0.1 * mood);
-      for (let k = 0; k < S.RIBBONS; k++) {
-        centres[k] = H * (0.5 + this.centerOffset + gap * (k - (S.RIBBONS - 1) / 2)); // bass at the bottom
-        cycles[k] = RIBBON_CYCLES[k] * stretch;
-        phase[k] = this.seedPhase[k] + RIBBON_SPEED[k] * motion;
-        const target = mixHue(NOTE_HUES[tones[k]], now.hue, 0.4 * now.clarity * this.live);
-        const h = Number.isNaN(this.ribbonHue[k]) ? target : mixHue(this.ribbonHue[k], target, ease(0.5));
-        this.ribbonHue[k] = h;
-        const L = 0.66 + 0.045 * k + lift; // higher pitch, lighter
-        const rs = sat * (1 - 0.06 * k);   // lower register, more saturated
-        colA.set(vivid(L, h, rs), k * 3);
-        colB.set(vivid(L + 0.08, h + 0.05, rs * 0.92), k * 3);
-      }
-      gl.uniform1fv(p.u.uCenterY, centres);
-      gl.uniform1fv(p.u.uCycles, cycles);
-      gl.uniform1fv(p.u.uPhase, phase);
-      gl.uniform3fv(p.u.uColA, colA);
-      gl.uniform3fv(p.u.uColB, colB);
-      gl.uniform1f(p.u.uAmp, H * (tall ? 0.085 : this.compact ? 0.11 : 0.125));
-      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.15);
-      gl.uniform1f(p.u.uIntensity, level * 1.15);
-    } else {
-      const p = this.prog.rings;
-      gl.useProgram(p.p);
-      gl.uniform1i(p.u.uHist, 1);
-      gl.uniform1i(p.u.uShape, 2);
-      gl.uniform2f(p.u.uCenterPx, W / 2, H * (0.5 + this.centerOffset));
-      gl.uniform1f(p.u.uRmax, 0.45 * unit);
-      gl.uniform1f(p.u.uTime, time);
-      gl.uniform1f(p.u.uRingT, (a?.beatPeriod ?? 0.6) / 2);
-      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.5);
-      gl.uniform1f(p.u.uIntensity, level * 1.5);
+    // ---- the sky moves with the music --------------------------------------
+    const tempo = a ? a.bpm / 120 : 0.5;
+    const flowSpeed = (0.008 + 0.03 * this.energy) * tempo;
+    this.skyFlow[0] += flowSpeed * dt * (0.8 + 0.4 * Math.sin(0.05 * time));
+    this.skyFlow[1] += flowSpeed * dt * 0.35;
+    this.skyRot += 0.0045 * tempo * (0.6 + 0.8 * this.energy) * dt;
+    // A clear onset sends a wave out from the centre (at most one per quarter second).
+    if (a && playing && onset > 0.35 && time - this.lastHit > 0.25) {
+      this.hits[this.hitNext * 2] = time;
+      this.hits[this.hitNext * 2 + 1] = Math.min(1, onset * (0.4 + loud));
+      this.hitNext = (this.hitNext + 1) % 6;
+      this.lastHit = time;
     }
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // ---- what each design needs from the music ------------------------------
+    if (s && a) for (let k = 0; k < BAND_COUNT; k++) this.bandsNow[k] += ((playing ? s.bands[k] : 0) - this.bandsNow[k]) * ease(0.25);
+    this.bassE += ((this.bandsNow[0] + this.bandsNow[1]) / 2 - this.bassE) * ease(1.5);
+    this.trebleE += ((this.bandsNow[6] + this.bandsNow[7]) / 2 - this.trebleE) * ease(0.3);
+    // The strongest notes, sharpened (fourth power) so they are not averaged away.
+    let sharpSum = 0;
+    for (let pc = 0; pc < 12; pc++) { this.sharp[pc] = this.chroma[pc] ** 4; sharpSum += this.sharp[pc]; }
+    for (let pc = 0; pc < 12; pc++) {
+      const w = sharpSum > 0 ? this.sharp[pc] / sharpSum : pc === tonic ? 1 : 0;
+      this.plateW[pc] += (w - this.plateW[pc]) * ease(0.35);
+    }
+    const order = Array.from({ length: 12 }, (_, i) => i).sort((x, y) => this.plateW[y] - this.plateW[x]);
+    const ctx: DrawCtx = { W, H, unit, time, dt, ease, level, tonic, minor, mood, now, cx: W / 2, cy: H * (0.5 + this.centerOffset), order };
+
+    const shown = !a ? [{ design: 'ribbons' as Design, weight: 1 }]
+      : this.force ? [{ design: this.force, weight: 1 }]
+      : designsAt(this.sections, time, Math.min(4, Math.max(2, 4 * a.beatPeriod)));
+    let top = shown[0];
+    for (const d of shown) if (d.weight > top.weight) top = d;
+    this.current = top.design;
+    for (const { design, weight } of shown) {
+      if (weight < 0.002) continue;
+      this.draw(design, ctx, weight);
+    }
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.accum.tex);
@@ -418,8 +578,208 @@ export class PlateRenderer {
     gl.uniform1f(pr.u.uExposure, 1.25);
     gl.uniform3f(pr.u.uBg, bg[0], bg[1], bg[2]);
     gl.uniform2f(pr.u.uInvRes, 1 / W, 1 / H);
+    // Sky: same song, same sky. Busier music → more stars; brighter timbre → hotter, bluer stars;
+    // treble → deeper twinkle; bass → brighter nebula.
+    const seed = a ? (a.seed >>> 0) % 997 : 17;
+    gl.uniform1f(pr.u.uTime, a ? time : this.idleClock);
+    gl.uniform1f(pr.u.uUnit, unit);
+    gl.uniform1f(pr.u.uSeed, seed + 0.5);
+    gl.uniform1f(pr.u.uStarDensity, Math.min(0.34, 0.1 + 1.6 * this.songBusy));
+    gl.uniform1f(pr.u.uWarm, 0.6 * this.songBright + 0.4 * this.brightness);
+    gl.uniform1f(pr.u.uTwinkle, 0.12 + 0.7 * this.trebleE);
+    gl.uniform1f(pr.u.uNebula, 0.5 + 1.4 * this.bassE);
+    // Nebula: the colour of the notes sounding now, shading into the key's fifth.
+    const nA = vivid(0.5, a ? mixHue(keyHue, now.hue, 0.7 * now.clarity) : keyHue, 0.7), nB = vivid(0.5, NOTE_HUES[(tonic + 7) % 12], 0.7);
+    gl.uniform3f(pr.u.uNebA, nA[0] * 0.05, nA[1] * 0.05, nA[2] * 0.05);
+    gl.uniform3f(pr.u.uNebB, nB[0] * 0.05, nB[1] * 0.05, nB[2] * 0.05);
+    const ang = Math.PI * (0.15 + 0.7 * hash01(seed * 31 + 7));
+    gl.uniform2f(pr.u.uBandDir, Math.cos(ang), Math.sin(ang));
+    gl.uniform2f(pr.u.uFlow, this.skyFlow[0], this.skyFlow[1]);
+    gl.uniform1f(pr.u.uRot, this.skyRot);
+    const hits = new Float32Array(24);
+    for (let i = 0; i < 6; i++) {
+      const age = time - this.hits[i * 2];
+      const ok = a && this.hits[i * 2 + 1] > 0 && age >= 0 && age < 8;
+      hits[i * 4] = ok ? age : 0;
+      hits[i * 4 + 1] = ok ? this.hits[i * 2 + 1] : 0;
+    }
+    gl.uniform4fv(pr.u.uHits, hits);
+    gl.uniform1f(pr.u.uWaveSpeed, unit * 0.45);
+    // Caption: rises and fades in over the first seconds, then fades away.
+    const capA = a && this.caption.show ? smooth01(0.3, 1.5, time) * (1 - smooth01(6.5, 8, time)) : 0;
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.captionTex);
+    gl.uniform1i(pr.u.uCaption, 3);
+    gl.uniform1f(pr.u.uCaptionAlpha, capA);
+    this.captionAlpha = capA;
+    gl.uniform1f(pr.u.uCaptionLift, (1 - smooth01(0.3, 2.2, time)) * 0.015);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
+
+  /** Draws one design into the light buffer at `weight` of its full strength. */
+  private draw(design: Design, c: DrawCtx, weight: number) {
+    const gl = this.gl;
+    const { W, H, unit, ease } = c;
+    const lvl = c.level * weight;
+    const note = (pc: number, L = 0.72, sat = 0.95) =>
+      vivid(L + 0.07 * (this.brightness - 0.5), NOTE_HUES[pc], Math.min(1, sat * (0.85 + 0.15 * this.energy + 0.3 * this.kick)));
+    if (design === 'ribbons') {
+      const p = this.prog.ribbons;
+      gl.useProgram(p.p);
+      gl.uniform1i(p.u.uHist, 1);
+      gl.uniform2f(p.u.uRes, W, H);
+      const tall = H > W && !this.compact;
+      const gap = tall ? 0.2 : this.compact ? 0.03 : 0.125;
+      const centres = new Float32Array(S.RIBBONS), cycles = new Float32Array(S.RIBBONS), phase = new Float32Array(S.RIBBONS);
+      const colA = new Float32Array(S.RIBBONS * 3), colB = new Float32Array(S.RIBBONS * 3);
+      const motion = this.motionAt(c.time);
+      const stretch = Math.sqrt(Math.min(1.6, Math.max(0.5, W / H)));
+      // Each ribbon is a note of the key's chord (root at the bottom, then fifth, third, seventh),
+      // coloured by that note's light, and drifting toward the notes sounding now.
+      const tones = chordTones(c.tonic, c.minor);
+      const lift = 0.07 * (this.brightness - 0.5) + 0.03 * c.mood + 0.06 * this.kick;
+      const sat = (0.8 + 0.2 * this.energy + 0.3 * this.kick) * (1 + 0.1 * c.mood);
+      for (let k = 0; k < S.RIBBONS; k++) {
+        centres[k] = H * (0.5 + this.centerOffset + gap * (k - (S.RIBBONS - 1) / 2)); // bass at the bottom
+        cycles[k] = RIBBON_CYCLES[k] * stretch;
+        phase[k] = this.seedPhase[k] + RIBBON_SPEED[k] * motion;
+        const target = mixHue(NOTE_HUES[tones[k]], c.now.hue, 0.4 * c.now.clarity * this.live);
+        const h = Number.isNaN(this.ribbonHue[k]) ? target : mixHue(this.ribbonHue[k], target, ease(0.5));
+        this.ribbonHue[k] = h;
+        const L = 0.66 + 0.045 * k + lift; // higher pitch, lighter
+        const rs = sat * (1 - 0.06 * k);   // lower register, more saturated
+        colA.set(vivid(L, h, rs), k * 3);
+        colB.set(vivid(L + 0.08, h + 0.05, rs * 0.92), k * 3);
+      }
+      gl.uniform1fv(p.u.uCenterY, centres);
+      gl.uniform1fv(p.u.uCycles, cycles);
+      gl.uniform1fv(p.u.uPhase, phase);
+      gl.uniform3fv(p.u.uColA, colA);
+      gl.uniform3fv(p.u.uColB, colB);
+      gl.uniform1f(p.u.uAmp, H * (tall ? 0.085 : this.compact ? 0.11 : 0.125));
+      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.15);
+      gl.uniform1f(p.u.uIntensity, lvl * 1.15);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    } else if (design === 'rings') {
+      const p = this.prog.rings;
+      gl.useProgram(p.p);
+      gl.uniform1i(p.u.uHist, 1);
+      gl.uniform1i(p.u.uShape, 2);
+      gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
+      gl.uniform1f(p.u.uRmax, 0.45 * unit);
+      gl.uniform1f(p.u.uTime, c.time);
+      gl.uniform1f(p.u.uRingT, (this.analysis?.beatPeriod ?? 0.6) / 2);
+      gl.uniform1f(p.u.uWidthPx, (unit / 800) * 1.5);
+      gl.uniform1f(p.u.uIntensity, lvl * 1.5);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    } else if (design === 'plate') {
+      const p = this.prog.plate;
+      gl.useProgram(p.p);
+      const modes = new Float32Array(24), cols = new Float32Array(36);
+      for (let pc = 0; pc < 12; pc++) {
+        modes.set(plateMode((pc - c.tonic + 12) % 12), pc * 2);
+        cols.set(note(pc, 0.74), pc * 3);
+      }
+      gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
+      gl.uniform1f(p.u.uHalf, 0.41 * unit);
+      gl.uniform2fv(p.u.uModes, modes);
+      gl.uniform1fv(p.u.uWeight, this.plateW);
+      gl.uniform3fv(p.u.uCol, cols);
+      gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.3);
+      gl.uniform1f(p.u.uJump, Math.min(1, this.kick * 1.5));
+      gl.uniform1f(p.u.uTime, c.time);
+      gl.uniform1f(p.u.uIntensity, lvl * 1.6);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    } else if (design === 'figure' || design === 'ripples') {
+      // The two strongest notes; `lo` is the lower one in the octave above the key note.
+      const n1 = c.order[0];
+      let n2 = c.order[1];
+      const second = this.plateW[n2] / Math.max(1e-6, this.plateW[n1]);
+      if (second < 0.15) n2 = n1; // one note: unison
+      const rel1 = (n1 - c.tonic + 12) % 12, rel2 = (n2 - c.tonic + 12) % 12;
+      const lo = rel1 <= rel2 ? n1 : n2, hi = rel1 <= rel2 ? n2 : n1;
+      const interval = (hi - lo + 12) % 12;
+      const fLo = 261.6256 * Math.pow(2, lo / 12);   // in the octave from middle C
+      const fHi = fLo * Math.pow(2, interval / 12);   // equal temperament, as played
+      if (design === 'figure') {
+        const [pn, qn] = JUST[interval];
+        // The figure turns at the gap between the played ratio and the whole-number ratio (the beat).
+        const beat = fHi - (fLo * pn) / qn;
+        this.figurePhase += 2 * Math.PI * beat * c.dt;
+        const p = this.prog.figure;
+        gl.useProgram(p.p);
+        gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
+        gl.uniform2f(p.u.uRes, W, H);
+        gl.uniform1f(p.u.uAmp, unit * (0.3 + 0.08 * this.energy));
+        gl.uniform1f(p.u.uP, pn);
+        gl.uniform1f(p.u.uQ, qn);
+        gl.uniform1f(p.u.uPhase, this.figurePhase + Math.PI / 2);
+        const loops = 5;
+        gl.uniform1f(p.u.uLoops, loops);
+        // Pendulum damping: loud, full sound keeps the swing wide for longer.
+        gl.uniform1f(p.u.uDamp, -Math.log(0.3 + 0.35 * this.energy) / (2 * Math.PI * loops));
+        gl.uniform1f(p.u.uPoints, FIGURE_POINTS);
+        gl.uniform1f(p.u.uPointPx, Math.max(1.5, (unit / 900) * 3));
+        const A = note(lo), B = note(hi);
+        gl.uniform3f(p.u.uColA, A[0], A[1], A[2]);
+        gl.uniform3f(p.u.uColB, B[0], B[1], B[2]);
+        gl.uniform1f(p.u.uIntensity, lvl * 0.55 * Math.sqrt(900 / unit) * (12 / (pn + qn + 6)));
+        gl.drawArrays(gl.POINTS, 0, FIGURE_POINTS);
+      } else {
+        const p = this.prog.ripples;
+        gl.useProgram(p.p);
+        const tall = H > W;
+        const sep = 0.22 * (tall ? H : W);
+        gl.uniform2fv(p.u.uSrc, tall ? [c.cx, c.cy - sep / 2, c.cx, c.cy + sep / 2] : [c.cx - sep / 2, c.cy, c.cx + sep / 2, c.cy]);
+        // One medium, one speed: wavelength ∝ 1 / frequency.
+        const base = 0.075 * unit, fRef = 261.6256 * Math.pow(2, c.tonic / 12);
+        const kLo = (2 * Math.PI * (fLo / fRef)) / base, kHi = (2 * Math.PI * (fHi / fRef)) / base;
+        const speed = 0.9; // wave cycles per second at the key note, slowed to be seen
+        this.ripplePhase[0] += 2 * Math.PI * speed * (fLo / fRef) * c.dt;
+        this.ripplePhase[1] += 2 * Math.PI * speed * (fHi / fRef) * c.dt;
+        gl.uniform1fv(p.u.uK, [kLo, kHi]);
+        gl.uniform1fv(p.u.uPhase, this.ripplePhase);
+        const aLo = this.plateW[lo] + 0.2 * this.bassE, aHi = (n2 === n1 ? this.plateW[lo] : this.plateW[hi]) + 0.1;
+        gl.uniform1fv(p.u.uAmp, [aLo, aHi]);
+        const A = note(lo), B = note(hi);
+        gl.uniform3fv(p.u.uCol, [...A, ...B]);
+        gl.uniform1f(p.u.uUnit, unit);
+        gl.uniform1f(p.u.uWidthPx, 1.2);
+        gl.uniform1f(p.u.uIntensity, lvl * 1.4);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
+    } else if (design === 'membrane') {
+      const p = this.prog.membrane;
+      gl.useProgram(p.p);
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D, this.besselTex);
+      gl.uniform1i(p.u.uBessel, 4);
+      // Mode 0 (the whole skin breathing) follows loudness; mode n follows pitch range n.
+      const amp = new Float32Array(9);
+      amp[0] = 0.5 * this.energy;
+      for (let n = 1; n < 9; n++) amp[n] = this.bandsNow[n - 1];
+      let total = 0;
+      for (let n = 0; n < 9; n++) total += amp[n];
+      for (let n = 0; n < 9; n++) {
+        amp[n] = (amp[n] / (0.6 + total)) * 1.1;
+        // Each mode turns at a speed in proportion to its frequency (j_n1), alternating direction.
+        this.membraneTurn[n] += (n % 2 ? 1 : -1) * 0.05 * (BESSEL_ZEROS[n] / BESSEL_ZEROS[0]) * c.dt * (0.3 + this.energy);
+      }
+      gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
+      gl.uniform1f(p.u.uRadius, 0.43 * unit);
+      gl.uniform1fv(p.u.uAmp, amp);
+      gl.uniform1fv(p.u.uTurn, this.membraneTurn);
+      const inner = note(c.order[0], 0.76);
+      const outer = vivid(0.7, mixHue(NOTE_HUES[c.tonic], NOTE_HUES[(c.tonic + 7) % 12], 0.5), 0.9);
+      gl.uniform3f(p.u.uColIn, inner[0], inner[1], inner[2]);
+      gl.uniform3f(p.u.uColOut, outer[0], outer[1], outer[2]);
+      gl.uniform1f(p.u.uLines, 14);
+      gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.1);
+      gl.uniform1f(p.u.uIntensity, lvl * 1.3);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+  }
+
 
   dispose() {
     this.canvas.removeEventListener('webglcontextlost', this.onLost);
