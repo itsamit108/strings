@@ -2,7 +2,7 @@
  * Song title and artist: from the file's own tags (ID3, MP4/iTunes, Vorbis, FLAC, RIFF INFO, APE),
  * else from a file name like "Artist - Title".
  */
-export interface SongInfo { title: string; artist: string }
+export interface SongInfo { title: string; artist: string; /** seconds, when the file's header says */ duration?: number }
 
 /** Cleans a file name: drops the extension and common download clutter. */
 function fromFileName(name: string): SongInfo {
@@ -25,7 +25,8 @@ export async function readSongInfo(file: File): Promise<SongInfo> {
     const title = meta.common.title?.trim();
     // The performer if tagged, else the album artist, else the composer.
     const artist = (meta.common.artist ?? meta.common.albumartist ?? meta.common.artists?.join(', ') ?? meta.common.composer?.join(', '))?.trim();
-    return { title: title || guess.title, artist: artist || (title ? '' : guess.artist) };
+    const duration = meta.format.duration && Number.isFinite(meta.format.duration) ? meta.format.duration : undefined;
+    return { title: title || guess.title, artist: artist || (title ? '' : guess.artist), duration };
   } catch {
     return guess;
   }

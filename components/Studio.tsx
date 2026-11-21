@@ -264,8 +264,27 @@ export default function Studio() {
     setProgress(0);
     let audio: AudioBuffer;
     const info = readSongInfo(file);
+    // A decoded song lives in memory as 32-bit samples. If full quality would not fit this device,
+    // decode at a lower sample rate (each step still above what the analysis needs, 10 kHz bands).
+    const { duration } = await info;
+    let rate: number | undefined;
+    if (duration) {
+      const gb = (navigator as unknown as { deviceMemory?: number }).deviceMemory;
+      const phone = window.matchMedia('(pointer: coarse)').matches;
+      const budget = (gb ? gb * 0.25 : phone ? 1 : 2) * 1e9;
+      // stereo song + a mono copy for measuring, 4 bytes each
+      const need = (r: number) => duration * r * 3 * 4;
+      const full = p.ctx.sampleRate;
+      if (need(full) > budget) {
+        rate = [32000, 24000, 22050].find((r) => need(r) <= budget);
+        if (!rate) {
+          fail(`"${file.name}" is ${clock(duration)} long, more than this device has memory for. Try a shorter file, or a computer.`);
+          return;
+        }
+      }
+    }
     try {
-      audio = await p.decode(await file.arrayBuffer());
+      audio = await p.decode(await file.arrayBuffer(), rate);
     } catch (e) {
       if (id === loadId.current) fail(noSound(file.name, e));
       return;

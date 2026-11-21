@@ -14,6 +14,9 @@ export class Player {
 
   constructor() {
     const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    // iPhone and iPad: without this, Web Audio is silent whenever the ring/silent switch is on.
+    const session = (navigator as unknown as { audioSession?: { type: string } }).audioSession;
+    if (session) { try { session.type = 'playback'; } catch { /* older Safari */ } }
     this.ctx = new Ctor({ latencyHint: 'playback' });
     this.gain = this.ctx.createGain();
     this.gain.connect(this.ctx.destination);
@@ -22,10 +25,15 @@ export class Player {
   /** Where extra listeners (such as a recorder) can tap the sound. */
   get output(): AudioNode { return this.gain; }
 
-  async decode(data: ArrayBuffer): Promise<AudioBuffer> {
+  /**
+   * Decodes a file. `rate`, when lower than the device's own, decodes at that sample rate instead:
+   * a long recording then takes less memory (used only when full quality would not fit).
+   */
+  async decode(data: ArrayBuffer, rate?: number): Promise<AudioBuffer> {
+    const dec: BaseAudioContext = rate && rate < this.ctx.sampleRate ? new OfflineAudioContext(1, 1, rate) : this.ctx;
     // decodeAudioData detaches the buffer it is given, so keep the original for the fallback.
     try {
-      return await this.ctx.decodeAudioData(data.slice(0));
+      return await dec.decodeAudioData(data.slice(0));
     } catch (first) {
       // Chromium can't read fragmented MP4s (screen recorders, many downloads) and some MOVs.
       // Pull the sound frames out ourselves and decode those instead.
@@ -38,10 +46,10 @@ export class Player {
       const adts = toAdts(track);
       if (adts) {
         try {
-          return await this.ctx.decodeAudioData(adts);
+          return await dec.decodeAudioData(adts);
         } catch { /* try WebCodecs below */ }
       }
-      return await decodeWithWebCodecs(track, this.ctx);
+      return await decodeWithWebCodecs(track, dec);
     }
   }
 

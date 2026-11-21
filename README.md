@@ -131,14 +131,24 @@ drag and drop, the launch queue for "Open with".
 
 ## Tested, and not
 
-Tested in headless Chromium with software rendering: production build, the demo, opening a WAV,
-phone and desktop layout, and a 720p export checked with ffprobe (H.264 video, Opus sound, video length equal to the source length).
+Tested in headless Chrome (desktop and phone sizes): production build; the demo; a fragmented MP4 with AAC
+sound; WAV files that are silent, 3 s long, noise only, 48 kHz mono, 5.1 (sound only in the centre channel)
+and 12 minutes long; every design forced on its own; reduced motion; caption click-to-edit; two files opened
+in quick succession; low-memory devices (1 GB: decoded at a lower rate; 0.5 GB: refused with a message);
+exports in 16:9, 9:16 and 1:1 (H.264 + AAC, length equal to the source to one frame); the recording fallback
+with WebCodecs removed (records at the chosen size).
 
-Not tested: real GPUs and frame rates, Safari, Firefox, iOS, Android, the AAC path, the
-write-to-disk path, the recording fallback, installing the PWA, files other than WAV, and long files.
+Not tested: Safari, iOS, Firefox and Android on real devices (their engines cannot run on the test machine),
+real GPUs and frame rates, installing the PWA, and the write-to-disk path. Known Safari behaviour is handled in
+code: the iPhone ring/silent switch (`navigator.audioSession`), no Fullscreen on iPhone, and the recording
+fallback where WebCodecs encoders are missing.
 
-## Not done
+## Limits
 
-- A WebGPU path.
-- Very long files are decoded fully into memory.
-- Tests are scripts, not a test suite.
+- "Voice" is the voice range (about 315 Hz – 2.5 kHz); an instrument there counts too. Telling a voice from
+  an instrument would need a separation model.
+- Moving frequencies are shown at a fixed slow-down (÷256, ÷512); ratios between them are exact.
+- The mood colour shift follows the direction of the listener studies; its strength is a choice.
+- Long recordings that would not fit the device's memory are decoded at a lower sample rate, or refused
+  with a message when even that would not fit.
+- A WebGPU path; tests are scripts, not a test suite.
