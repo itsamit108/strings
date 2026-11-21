@@ -283,7 +283,7 @@ export const PLATE_FS = /* glsl */ `#version 300 es
 precision highp float;
 uniform vec2 uCenterPx;
 uniform float uHalf;          // half the plate's side, in pixels
-uniform vec2 uModes[12];      // (n, m) for each note
+uniform vec3 uModes[12];      // (n, m, ±1) for each note
 uniform float uWeight[12];    // how strongly each note sounds now
 uniform vec3 uCol[12];        // each note's light
 uniform float uWidthPx;
@@ -306,8 +306,9 @@ void main() {
   for (int i = 0; i < 12; i++) {
     float w = uWeight[i];
     if (w < 0.004) continue;
-    vec2 nm = uModes[i];
-    float ui = cos(nm.x * x.x) * cos(nm.y * x.y) - cos(nm.y * x.x) * cos(nm.x * x.y);
+    vec3 nm = uModes[i];
+    // (n, m) and (m, n) ring at the same frequency; a plate shows their sum or their difference.
+    float ui = cos(nm.x * x.x) * cos(nm.y * x.y) + nm.z * cos(nm.y * x.x) * cos(nm.x * x.y);
     u += w * ui;
     col += uCol[i] * w * (0.25 + abs(ui));
     sum += w * (0.25 + abs(ui));
@@ -335,11 +336,12 @@ void main() {
  */
 export const RIPPLES_FS = /* glsl */ `#version 300 es
 precision highp float;
-uniform vec2 uSrc[2];
-uniform float uK[2];       // wavenumber, radians per pixel
-uniform float uPhase[2];   // ω·t
-uniform float uAmp[2];
-uniform vec3 uCol[2];
+uniform vec2 uSrc[4];      // one source for each note clearly sounding (2 to 4)
+uniform float uK[4];       // wavenumber, radians per pixel
+uniform float uPhase[4];   // ω·t
+uniform float uAmp[4];
+uniform vec3 uCol[4];
+uniform int uCount;
 uniform float uUnit;
 uniform float uWidthPx;
 uniform float uIntensity;
@@ -349,7 +351,8 @@ void main() {
   float h = 0.0, total = 0.0;
   vec3 col = vec3(0.0);
   float wsum = 0.0;
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < 4; i++) {
+    if (i >= uCount) break;
     float r = length(p - uSrc[i]);
     float fall = uAmp[i] / sqrt(1.0 + r / (0.08 * uUnit));
     h += fall * cos(uK[i] * r - uPhase[i]);
@@ -408,47 +411,4 @@ void main() {
   float k = clamp(R, 0.0, 1.0);
   vec3 col = mix(uColIn, uColOut, k);
   o = vec4(col * line * inside * step(0.04, R) * (0.55 + 0.45 * k) * uIntensity, 1.0);
-}`;
-
-/**
- * FIGURE: what an oscilloscope draws when two notes drive its two axes (a Lissajous figure), traced
- * by a decaying pendulum pair (a harmonograph). The figure's shape is the notes' frequency ratio, taken
- * as the nearest simple ratio (a fifth is 3:2). The notes actually played in equal temperament are a
- * little off that ratio, so the figure slowly turns, at exactly the rate of the mismatch.
- */
-export const FIGURE_VS = /* glsl */ `#version 300 es
-precision highp float;
-uniform vec2 uCenterPx;
-uniform vec2 uRes;
-uniform float uAmp;
-uniform float uP;
-uniform float uQ;
-uniform float uPhase;
-uniform float uDamp;
-uniform float uLoops;
-uniform float uPoints;
-uniform float uPointPx;
-out float vT;
-void main() {
-  float i = float(gl_VertexID);
-  float t = i / uPoints;
-  float s = t * 6.2831853 * uLoops;
-  float decay = exp(-uDamp * s);
-  vec2 xy = uAmp * decay * vec2(sin(uQ * s + uPhase), sin(uP * s));
-  vec2 px = uCenterPx + xy;
-  gl_Position = vec4(px / uRes * 2.0 - 1.0, 0.0, 1.0);
-  gl_PointSize = uPointPx;
-  vT = t;
-}`;
-export const FIGURE_FS = /* glsl */ `#version 300 es
-precision highp float;
-uniform vec3 uColA;
-uniform vec3 uColB;
-uniform float uIntensity;
-in float vT;
-out vec4 o;
-void main() {
-  vec2 d = gl_PointCoord * 2.0 - 1.0;
-  float a = exp(-dot(d, d) * 4.0);
-  o = vec4(mix(uColA, uColB, vT) * a * uIntensity, 1.0);
 }`;

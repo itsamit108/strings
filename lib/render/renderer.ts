@@ -57,12 +57,16 @@ const BESSEL = (() => {
 /** Plate modes (n, m), n < m; a mode's frequency grows as n² + m². */
 const PLATE_MODES = (() => {
   const out: [number, number][] = [];
-  for (let m = 1; m <= 8; m++) for (let n = 0; n < m; n++) out.push([n, m]);
+  for (let m = 1; m <= 12; m++) for (let n = 0; n < m; n++) out.push([n, m]);
   return out;
 })();
-/** The plate mode whose frequency matches a note `rel` semitones above the key note. */
-function plateMode(rel: number): [number, number] {
-  const target = 30 * Math.pow(2, rel / 12);
+/**
+ * The plate mode whose frequency matches a note: a plate mode rings at PLATE_HZ·(n² + m²), PLATE_HZ being
+ * the plate's own constant (its size and stiffness). Low music makes broad patterns, high music fine ones.
+ */
+const PLATE_HZ = 12;
+function plateMode(hz: number): [number, number] {
+  const target = hz / PLATE_HZ;
   let best = PLATE_MODES[0], bestD = Infinity;
   for (const nm of PLATE_MODES) {
     const d = Math.abs(nm[0] ** 2 + nm[1] ** 2 - target) - 0.01 * nm[0];
@@ -70,9 +74,6 @@ function plateMode(rel: number): [number, number] {
   }
   return best;
 }
-/** Simplest whole-number ratio for each interval in semitones (just intonation), upper : lower. */
-const JUST: [number, number][] = [[1, 1], [16, 15], [9, 8], [6, 5], [5, 4], [4, 3], [45, 32], [3, 2], [8, 5], [5, 3], [9, 5], [15, 8]];
-const FIGURE_POINTS = 14000;
 /** Real frequencies are far too fast to see; moving ones are shown eight octaves down (÷256). */
 const SLOW = 256;
 /** Shown with the title and artist, in the picture and the video. */
@@ -83,6 +84,8 @@ interface DrawCtx {
   W: number; H: number; unit: number; time: number; dt: number; ease: (tau: number) => number; level: number;
   tonic: number; minor: boolean; mood: number; now: { hue: number; clarity: number };
   cx: number; cy: number; order: number[];
+  /** frequency (Hz) of each pitch class in the octave where the sound's energy sits now */
+  noteHz: number[];
   /** size swell from the bass */
   pulse: number;
   /** line width from the voice range */
@@ -102,7 +105,7 @@ function hash01(n: number): number {
 
 export class PlateRenderer {
   private gl!: WebGL2RenderingContext;
-  private prog!: Record<'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'figure' | 'fade' | 'present', Program>;
+  private prog!: Record<'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'fade' | 'present', Program>;
   private besselTex!: WebGLTexture;
   private captionTex!: WebGLTexture;
   private labelTex!: WebGLTexture;
@@ -186,8 +189,7 @@ export class PlateRenderer {
   private prevVoice = 0;
   private trebleE = 0;
   /** phases that run on with the music (kept, so nothing jumps when the notes change) */
-  private figurePhase = 0;
-  private ripplePhase = new Float32Array(2);
+  private ripplePhase = new Float32Array(4);
   private membraneTurn = new Float32Array(9);
   /** each drum-skin mode's oscillation phase */
   private membranePhase = new Float32Array(9);
@@ -265,7 +267,7 @@ export class PlateRenderer {
     };
     this.prog = {
       ribbons: mk(S.RIBBONS_FS), rings: mk(S.RINGS_FS), plate: mk(S.PLATE_FS), ripples: mk(S.RIPPLES_FS),
-      membrane: mk(S.MEMBRANE_FS), figure: mk(S.FIGURE_FS, S.FIGURE_VS), fade: mk(S.FADE_FS), present: mk(S.PRESENT_FS),
+      membrane: mk(S.MEMBRANE_FS), fade: mk(S.FADE_FS), present: mk(S.PRESENT_FS),
     };
     this.vao = gl.createVertexArray()!;
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -313,7 +315,6 @@ export class PlateRenderer {
     this.bassE = this.trebleE = 0;
     this.bassNow = this.bassHit = this.prevBass = 0;
     this.voiceNow = this.voiceIn = this.prevVoice = 0;
-    this.figurePhase = 0;
     this.hits.fill(0);
     this.hitNext = 0;
     this.lastHit = -1;
@@ -675,8 +676,16 @@ export class PlateRenderer {
     }
     const order = Array.from({ length: 12 }, (_, i) => i).sort((x, y) => this.plateW[y] - this.plateW[x]);
     const pulse = this.reducedMotion ? 1 : 1 + 0.07 * this.bassNow + 0.06 * this.bassHit;
+    // The notes' octave: where the spectrum's energy sits now (centre of the pitch-range levels).
+    let wsum = 0, ksum = 0;
+    for (let k = 0; k < BAND_COUNT; k++) { wsum += this.bandsNow[k]; ksum += this.bandsNow[k] * k; }
+    const register = BAND_LOW_HZ * Math.pow(BAND_HIGH_HZ / BAND_LOW_HZ, ((wsum > 1e-6 ? ksum / wsum : 3.5) + 0.5) / BAND_COUNT);
+    const noteHz = Array.from({ length: 12 }, (_, pc) => {
+      const base = 261.6256 * Math.pow(2, pc / 12);
+      return base * Math.pow(2, Math.round(Math.log2(register / base)));
+    });
     const voiceWide = 1 + 0.35 * this.voiceNow;
-    const ctx: DrawCtx = { W, H, unit, time, dt, ease, level: level * (1 + 0.35 * this.bassHit) * (1 + 0.3 * this.voiceNow + 0.35 * this.voiceIn), tonic, minor, mood, now, cx: W / 2, cy: H * (0.5 + this.centerOffset), order, pulse, voiceWide };
+    const ctx: DrawCtx = { W, H, unit, time, dt, ease, level: level * (1 + 0.35 * this.bassHit) * (1 + 0.3 * this.voiceNow + 0.35 * this.voiceIn), tonic, minor, mood, now, cx: W / 2, cy: H * (0.5 + this.centerOffset), order, pulse, voiceWide, noteHz };
 
     const plan = !a ? { shown: [{ design: 'ribbons' as Design, weight: 1 }], blend: 0 }
       : this.force ? { shown: [{ design: this.force, weight: 1 }], blend: 0 }
@@ -811,14 +820,15 @@ export class PlateRenderer {
     } else if (design === 'plate') {
       const p = this.prog.plate;
       gl.useProgram(p.p);
-      const modes = new Float32Array(24), cols = new Float32Array(36);
+      const modes = new Float32Array(36), cols = new Float32Array(36);
       for (let pc = 0; pc < 12; pc++) {
-        modes.set(plateMode((pc - c.tonic + 12) % 12), pc * 2);
+        // Which of the two equal-frequency combinations each note shows is fixed per song (its fingerprint).
+        modes.set([...plateMode(c.noteHz[pc]), this.membraneTurn[pc % 9] < Math.PI ? 1 : -1], pc * 3);
         cols.set(note(pc, 0.74), pc * 3);
       }
       gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
       gl.uniform1f(p.u.uHalf, 0.41 * unit * c.pulse);
-      gl.uniform2fv(p.u.uModes, modes);
+      gl.uniform3fv(p.u.uModes, modes);
       gl.uniform1fv(p.u.uWeight, this.plateW);
       gl.uniform3fv(p.u.uCol, cols);
       gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.3 * c.voiceWide);
@@ -826,69 +836,41 @@ export class PlateRenderer {
       gl.uniform1f(p.u.uTime, c.time);
       gl.uniform1f(p.u.uIntensity, lvl * 1.6);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-    } else if (design === 'figure' || design === 'ripples') {
-      // The two strongest notes; `lo` is the lower one in the octave above the key note.
-      const n1 = c.order[0];
-      let n2 = c.order[1];
-      const second = this.plateW[n2] / Math.max(1e-6, this.plateW[n1]);
-      if (second < 0.15) n2 = n1; // one note: unison
-      const rel1 = (n1 - c.tonic + 12) % 12, rel2 = (n2 - c.tonic + 12) % 12;
-      const lo = rel1 <= rel2 ? n1 : n2, hi = rel1 <= rel2 ? n2 : n1;
-      const interval = (hi - lo + 12) % 12;
-      // The notes' octave: where the spectrum's energy sits now (centre of the pitch-range levels).
-      let wsum = 0, ksum = 0;
-      for (let k = 0; k < BAND_COUNT; k++) { wsum += this.bandsNow[k]; ksum += this.bandsNow[k] * k; }
-      const register = BAND_LOW_HZ * Math.pow(BAND_HIGH_HZ / BAND_LOW_HZ, ((wsum > 1e-6 ? ksum / wsum : 3.5) + 0.5) / BAND_COUNT);
-      const base = 261.6256 * Math.pow(2, lo / 12);
-      const fLo = base * Math.pow(2, Math.round(Math.log2(register / base)));
-      const fHi = fLo * Math.pow(2, interval / 12);   // equal temperament, as played
-      if (design === 'figure') {
-        const [pn, qn] = JUST[interval];
-        // The figure turns at the gap between the played ratio and the whole-number ratio (the beat).
-        const beat = fHi - (fLo * pn) / qn;
-        this.figurePhase += 2 * Math.PI * beat * c.dt;
-        const p = this.prog.figure;
-        gl.useProgram(p.p);
-        gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
-        gl.uniform2f(p.u.uRes, W, H);
-        gl.uniform1f(p.u.uAmp, unit * (0.3 + 0.08 * this.energy) * c.pulse);
-        gl.uniform1f(p.u.uP, pn);
-        gl.uniform1f(p.u.uQ, qn);
-        gl.uniform1f(p.u.uPhase, this.figurePhase + Math.PI / 2);
-        const loops = 5;
-        gl.uniform1f(p.u.uLoops, loops);
-        // Pendulum damping: loud, full sound keeps the swing wide for longer.
-        gl.uniform1f(p.u.uDamp, -Math.log(0.3 + 0.35 * this.energy) / (2 * Math.PI * loops));
-        gl.uniform1f(p.u.uPoints, FIGURE_POINTS);
-        gl.uniform1f(p.u.uPointPx, Math.max(1.5, (unit / 900) * 3 * c.voiceWide));
-        const A = note(lo), B = note(hi);
-        gl.uniform3f(p.u.uColA, A[0], A[1], A[2]);
-        gl.uniform3f(p.u.uColB, B[0], B[1], B[2]);
-        gl.uniform1f(p.u.uIntensity, lvl * 0.55 * Math.sqrt(900 / unit) * (12 / (pn + qn + 6)));
-        gl.drawArrays(gl.POINTS, 0, FIGURE_POINTS);
-      } else {
-        const p = this.prog.ripples;
-        gl.useProgram(p.p);
-        const tall = H > W;
-        const sep = 0.22 * (tall ? H : W);
-        gl.uniform2fv(p.u.uSrc, tall ? [c.cx, c.cy - sep / 2, c.cx, c.cy + sep / 2] : [c.cx - sep / 2, c.cy, c.cx + sep / 2, c.cy]);
-        // One medium, one speed: wavelength ∝ 1 / frequency.
-        const base = 0.075 * unit, fRef = 261.6256 * Math.pow(2, c.tonic / 12);
-        const kLo = (2 * Math.PI * (fLo / fRef)) / base, kHi = (2 * Math.PI * (fHi / fRef)) / base;
+    } else if (design === 'ripples') {
+      // One source for each note clearly sounding (at least a quarter as strong as the strongest), 2 to 4.
+      const top = this.plateW[c.order[0]];
+      const notes = c.order.slice(0, 4).filter((pc, k) => k < 2 || this.plateW[pc] >= 0.25 * top);
+      if (this.plateW[notes[1]] < 0.15 * top) notes[1] = notes[0]; // one note: two sources in unison
+      const n = notes.length;
+      const p = this.prog.ripples;
+      gl.useProgram(p.p);
+      // Sources on a circle, turned by the song's fingerprint; with two, across the picture's long side.
+      const R = 0.11 * Math.max(W, H) * (n === 2 ? 1 : 0.9);
+      const turn = n === 2 ? (H > W ? Math.PI / 2 : 0) : this.membraneTurn[0];
+      const src: number[] = [], k: number[] = [], amp: number[] = [], col: number[] = [];
+      // One medium, one speed: wavelength ∝ 1 / frequency; the key note's wavelength is 0.075 of the picture.
+      const fRef = c.noteHz[c.tonic];
+      for (let i = 0; i < n; i++) {
+        const a = turn + (2 * Math.PI * i) / n;
+        src.push(c.cx + R * Math.cos(a), c.cy + R * Math.sin(a));
+        const f = c.noteHz[notes[i]];
+        k.push((2 * Math.PI * (f / fRef)) / (0.075 * unit));
         // The waves oscillate at the notes' own frequencies, eight octaves down (÷256) so the eye can follow.
-        this.ripplePhase[0] += 2 * Math.PI * (fLo / SLOW) * c.dt;
-        this.ripplePhase[1] += 2 * Math.PI * (fHi / SLOW) * c.dt;
-        gl.uniform1fv(p.u.uK, [kLo, kHi]);
-        gl.uniform1fv(p.u.uPhase, this.ripplePhase);
-        const aLo = this.plateW[lo] + 0.2 * this.bassE + 0.6 * this.bassHit, aHi = (n2 === n1 ? this.plateW[lo] : this.plateW[hi]) + 0.1;
-        gl.uniform1fv(p.u.uAmp, [aLo, aHi]);
-        const A = note(lo), B = note(hi);
-        gl.uniform3fv(p.u.uCol, [...A, ...B]);
-        gl.uniform1f(p.u.uUnit, unit);
-        gl.uniform1f(p.u.uWidthPx, 1.2);
-        gl.uniform1f(p.u.uIntensity, lvl * 1.4);
-        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        this.ripplePhase[i] += 2 * Math.PI * (f / SLOW) * c.dt;
+        amp.push(this.plateW[notes[i]] + 0.1 + (i === 0 ? 0.2 * this.bassE + 0.6 * this.bassHit : 0));
+        col.push(...note(notes[i]));
       }
+      for (let i = n; i < 4; i++) { src.push(0, 0); k.push(0); amp.push(0); col.push(0, 0, 0); }
+      gl.uniform1i(p.u.uCount, n);
+      gl.uniform2fv(p.u.uSrc, src);
+      gl.uniform1fv(p.u.uK, k);
+      gl.uniform1fv(p.u.uPhase, this.ripplePhase);
+      gl.uniform1fv(p.u.uAmp, amp);
+      gl.uniform3fv(p.u.uCol, col);
+      gl.uniform1f(p.u.uUnit, unit);
+      gl.uniform1f(p.u.uWidthPx, 1.2);
+      gl.uniform1f(p.u.uIntensity, lvl * 1.4);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
     } else if (design === 'membrane') {
       const p = this.prog.membrane;
       gl.useProgram(p.p);
@@ -918,7 +900,8 @@ export class PlateRenderer {
       const outer = vivid(0.7, mixHue(NOTE_HUES[c.tonic], NOTE_HUES[(c.tonic + 7) % 12], 0.5), 0.9);
       gl.uniform3f(p.u.uColIn, inner[0], inner[1], inner[2]);
       gl.uniform3f(p.u.uColOut, outer[0], outer[1], outer[2]);
-      gl.uniform1f(p.u.uLines, 14);
+      // Brighter sound (higher spectral centroid) has shorter waves: more, finer rings (8 to 20).
+      gl.uniform1f(p.u.uLines, 8 + 12 * Math.min(1, Math.max(0, this.brightness)));
       gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.1 * c.voiceWide);
       gl.uniform1f(p.u.uIntensity, lvl * 1.3);
       gl.drawArrays(gl.TRIANGLES, 0, 3);

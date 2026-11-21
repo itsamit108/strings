@@ -139,7 +139,7 @@ export default function Studio() {
     renderer.current = r;
     const s = songRef.current;
     if (s) r.setSong(s.analysis);
-    // For checking one design on its own: ?design=plate (ribbons, rings, plate, figure, ripples, membrane).
+    // For checking one design on its own: ?design=plate (ribbons, rings, plate, ripples, membrane).
     // Honour the system's "reduce motion" setting on screen (exported videos always have full motion).
     const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
     r.reducedMotion = calm.matches;
@@ -812,18 +812,15 @@ export default function Studio() {
         </p>
         <h4>Plate</h4>
         <p>
-          Sand on a vibrating plate gathers where the plate stands still. Each note shakes the plate in its own
-          pattern, matched to its frequency; the notes sounding now are added together. A hit throws the sand up.
-        </p>
-        <h4>Two-note figure</h4>
-        <p>
-          Two notes driving the two axes of an oscilloscope. A fifth draws a 3:2 figure, a third 5:4. Played notes are
-          slightly off those ratios, so the figure slowly turns, at exactly that difference.
+          Sand on a vibrating plate gathers where the plate stands still. Each note shakes the plate in the
+          pattern whose frequency matches it, so low music draws broad patterns and high music fine ones; the notes
+          sounding now are added together. A hit throws the sand up.
         </p>
         <h4>Ripple tank</h4>
         <p>
-          The two strongest notes as two wave sources in water. Higher notes make shorter waves. Where crests meet,
-          they add up; where a crest meets a trough, they cancel.
+          Each note clearly sounding is a wave source in water, two to four of them. Higher notes make shorter
+          waves. Where crests meet, they add up; where a crest meets a trough, they cancel, so a chord draws a
+          different pattern from a single interval.
         </p>
         <h4>Membrane</h4>
         <p>

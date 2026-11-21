@@ -10,8 +10,7 @@
  *
  * Design per section, from what was measured in it (scores are compared within the song):
  *  - Plate (Chladni figure): one note dominates and holds steady, the way one frequency drives a plate.
- *  - Figure (Lissajous): two notes sound together; the figure is drawn from their frequency ratio.
- *  - Ripples (two-source interference): two notes with weight in the bass, as two wave sources.
+ *  - Ripples (interference): two or more notes sounding together, each a wave source.
  *  - Rings: many onsets (hits); a ring leaves the centre on every half beat.
  *  - Membrane: weight in the voice range (about 300 Hz–2.5 kHz, pitch ranges 4–6), as modes of a round drum skin.
  *  - Ribbons: energy across the whole spectrum at once.
@@ -19,13 +18,12 @@
 import type { Analysis } from './types';
 import { BAND_COUNT } from './types';
 
-export type Design = 'ribbons' | 'rings' | 'plate' | 'figure' | 'ripples' | 'membrane';
-export const DESIGNS: Design[] = ['ribbons', 'rings', 'plate', 'figure', 'ripples', 'membrane'];
+export type Design = 'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane';
+export const DESIGNS: Design[] = ['ribbons', 'rings', 'plate', 'ripples', 'membrane'];
 export const DESIGN_NAMES: Record<Design, string> = {
   ribbons: 'Ribbons',
   rings: 'Rings',
   plate: 'Plate',
-  figure: 'Two-note figure',
   ripples: 'Ripple tank',
   membrane: 'Membrane',
 };
@@ -216,7 +214,6 @@ function raw(s: SectionStats): Record<Design, number> {
   const calm = 1 - Math.min(1, s.onset / 0.6);
   return {
     plate: s.top1 * (1 - s.pair) * s.steady * calm,
-    figure: s.top1 * s.pair * calm,
     ripples: s.pair * (0.4 + s.bass),
     rings: s.onset * (0.5 + s.loud),
     membrane: s.voice * (0.5 + s.loud) * (1 - s.spread * 0.5),
@@ -240,17 +237,19 @@ export function planSections(a: Analysis): Section[] {
     const top = Math.max(...vals, 1e-6);
     raws.forEach((r, i) => { z[i][d] = (r[d] - mean) / scale + 1.5 * (r[d] / top); });
   }
-  const used = new Set<Design>();
+  const used = new Map<Design, number>();
   const out: Section[] = [];
   let prev: Design | null = null;
   for (let i = 0; i < stats.length; i++) {
     let best: Design = 'ribbons', bestS = -Infinity;
     for (const d of DESIGNS) {
       if (d === prev) continue; // a new section always looks different
-      const s = z[i][d] + (used.has(d) ? 0 : 0.35);
+      // Fit first; then each earlier use of a design counts against it, so a song moves through its options.
+      const uses = used.get(d) ?? 0;
+      const s = z[i][d] + (uses === 0 ? 0.35 : -0.6 * uses);
       if (s > bestS) { bestS = s; best = d; }
     }
-    used.add(best);
+    used.set(best, (used.get(best) ?? 0) + 1);
     out.push({ start: cuts[i], end: cuts[i + 1], design: best, stats: stats[i], fade: changeWidth(score, blockSeconds, cuts[i], a.beatPeriod) });
     prev = best;
   }
