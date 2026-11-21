@@ -67,7 +67,7 @@ function plateMode(rel: number): [number, number] {
 const JUST: [number, number][] = [[1, 1], [16, 15], [9, 8], [6, 5], [5, 4], [4, 3], [45, 32], [3, 2], [8, 5], [5, 3], [9, 5], [15, 8]];
 const FIGURE_POINTS = 14000;
 /** Shown with the title and artist, in the picture and the video. */
-const CREDIT = 'Create yours at strings-coral.vercel.app';
+const CREDIT_URL = 'strings-coral.vercel.app';
 
 type Uniforms = Record<string, WebGLUniformLocation | null>;
 interface DrawCtx {
@@ -437,21 +437,29 @@ export class PlateRenderer {
       tPx: unit * (tall ? 0.042 : 0.034), aPx: unit * (tall ? 0.024 : 0.021),
       maxW: W * (tall ? 0.8 : 0.24), align: tall ? 'center' : 'left', shadow: unit * 0.012,
     }, (g, box) => {
-      // Where to make your own: small and quiet, with the title and artist.
-      const px = unit * (tall ? 0.026 : 0.016);
-      g.font = `450 ${px}px "Instrument Sans Variable", system-ui, "Segoe UI", sans-serif`;
-      g.shadowColor = 'rgba(0,0,0,0.6)';
-      g.shadowBlur = unit * 0.01;
-      g.fillStyle = tall ? 'rgba(226,220,208,0.78)' : 'rgba(214,208,196,0.62)';
+      // Where to make your own: "Create yours at" quietly, then the address bright and a little bolder,
+      // so it can be read off a phone and typed.
+      const px = unit * (tall ? 0.034 : 0.021);
+      const lead = 'Create yours at ', url = CREDIT_URL;
+      const fontLead = `450 ${px}px "Instrument Sans Variable", system-ui, "Segoe UI", sans-serif`;
+      const fontUrl = `620 ${px * 1.06}px "Instrument Sans Variable", system-ui, "Segoe UI", sans-serif`;
+      g.font = fontLead;
+      const wLead = g.measureText(lead).width;
+      g.font = fontUrl;
+      const wUrl = g.measureText(url).width;
+      const total = wLead + wUrl;
+      const y = H * 0.95;
+      const x0 = tall ? W / 2 - total / 2 : W * 0.955 - total;
+      g.shadowColor = 'rgba(0,0,0,0.75)';
+      g.shadowBlur = unit * 0.012;
+      g.textAlign = 'left';
       g.textBaseline = 'alphabetic';
-      if (tall) {
-        // On a phone it stands on its own at the bottom, apart from the title.
-        g.textAlign = 'center';
-        g.fillText(CREDIT, W / 2, H * 0.955);
-      } else {
-        g.textAlign = 'right';
-        g.fillText(CREDIT, W * 0.955, box.bottom > 0 ? box.bottom - unit * 0.008 : H * 0.8);
-      }
+      g.font = fontLead;
+      g.fillStyle = 'rgba(214,208,196,0.8)';
+      g.fillText(lead, x0, y);
+      g.font = fontUrl;
+      g.fillStyle = 'rgba(248,244,236,0.98)';
+      g.fillText(url, x0 + wLead, y);
     });
   }
 
