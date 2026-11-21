@@ -1,0 +1,626 @@
+'use client';
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { analyzeAudio, synthesizeDemo } from '@/lib/analysis/analyze';
+import type { Analysis } from '@/lib/analysis/types';
+import { fifthsAngle } from '@/lib/analysis/finalize';
+import { Player } from '@/lib/audio/player';
+import { DEMO_TITLE } from '@/lib/demo/synth';
+import { ExportUnsupportedError, exportOffline, offlineExportAvailable } from '@/lib/export/offline';
+import { exportRealtime, realtimeExportAvailable } from '@/lib/export/realtime';
+import { oklch, toCss } from '@/lib/render/color';
+import { HUE_OFFSET, PlateRenderer, type Scene } from '@/lib/render/renderer';
+
+type Phase = 'idle' | 'loading' | 'ready';
+type Shape = 'landscape' | 'portrait' | 'square';
+type ExportState =
+  | { stage: 'options' }
+  | { stage: 'running'; live: boolean }
+  | { stage: 'done'; url: string | null; name: string }
+  | { stage: 'error'; message: string };
+
+interface Song { title: string; analysis: Analysis; audio: AudioBuffer }
+
+const MAX_PIXELS = 3840 * 2160;
+const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const even = (n: number) => Math.round(n / 2) * 2;
+
+function drawArc(canvas: HTMLCanvasElement, a: Analysis) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  canvas.width = w;
+  canvas.height = h;
+  const g = canvas.getContext('2d');
+  if (!g) return;
+  g.clearRect(0, 0, w, h);
+  const step = Math.max(2, Math.round(3 * dpr)), mid = h / 2;
+  for (let x = 0; x < w; x += step) {
+    const i = Math.min(a.arc.length - 1, Math.floor((x / w) * a.arc.length));
+    const half = Math.max(dpr, a.arc[i] * (mid - dpr));
+    g.fillStyle = toCss(oklch(0.84, 0.1, a.arcHue[i] + HUE_OFFSET));
+    g.fillRect(x, mid - half, Math.max(1, step - dpr), half * 2);
+  }
+}
+
+export default function Studio() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const arcRef = useRef<HTMLCanvasElement>(null);
+  const arcPlayedRef = useRef<HTMLCanvasElement>(null);
+  const playedRef = useRef<HTMLDivElement>(null);
+  const headRef = useRef<HTMLDivElement>(null);
+  const nowRef = useRef<HTMLSpanElement>(null);
+  const sliderRef = useRef<HTMLDivElement>(null);
+  const exportDialog = useRef<HTMLDialogElement>(null);
+  const aboutDialog = useRef<HTMLDialogElement>(null);
+
+  const renderer = useRef<PlateRenderer | null>(null);
+  const player = useRef<Player | null>(null);
+  const songRef = useRef<Song | null>(null);
+  const offline = useRef(false);
+  const abort = useRef<AbortController | null>(null);
+  const fit = useRef<() => void>(() => {});
+  const lastSeek = useRef(0);
+  const phaseRef = useRef<Phase>('idle');
+  const sceneRef = useRef<Scene>('ribbons');
+
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [status, setStatus] = useState('');
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState('');
+  const [song, setSong] = useState<Song | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [quiet, setQuiet] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [canFullscreen, setCanFullscreen] = useState(false);
+  const [exp, setExp] = useState<ExportState | null>(null);
+  const [expProgress, setExpProgress] = useState(0);
+  const [shape, setShape] = useState<Shape>('landscape');
+  const [size, setSize] = useState(1080);
+  const [fps, setFps] = useState(60);
+  const [scene, setScene] = useState<Scene>('ribbons');
+
+  const chooseScene = (next: Scene) => {
+    sceneRef.current = next;
+    if (renderer.current) renderer.current.scene = next;
+    setScene(next);
+  };
+
+  const getPlayer = useCallback(() => {
+    if (!player.current) {
+      const p = new Player();
+      p.onState = () => setPlaying(p.playing);
+      player.current = p;
+    }
+    return player.current;
+  }, []);
+
+  // ---- renderer and frame loop --------------------------------------------
+  useEffect(() => {
+    const canvas = canvasRef.current!, stage = stageRef.current!;
+    let r: PlateRenderer;
+    try {
+      r = new PlateRenderer(canvas);
+    } catch (e) {
+      setError((e as Error).message);
+      return;
+    }
+    renderer.current = r;
+    const s = songRef.current;
+    if (s) r.setSong(s.analysis);
+    r.scene = sceneRef.current;
+
+    fit.current = () => {
+      if (offline.current) return;
+      const dpr = window.devicePixelRatio || 1;
+      let w = stage.clientWidth * dpr, h = stage.clientHeight * dpr;
+      const k = Math.min(1, Math.sqrt(MAX_PIXELS / (w * h)));
+      w *= k; h *= k;
+      // Leave room for the controls under the plate.
+      const tall = h > w;
+      const first = phaseRef.current !== 'ready';
+      r.compact = first; // on the first screen the waves stay clear of the text
+      r.centerOffset = first ? (tall ? 0.24 : 0.1) : tall ? 0.02 : 0.04;
+      r.resize(w, h);
+      const a = songRef.current?.analysis;
+      if (a) for (const c of [arcRef.current, arcPlayedRef.current]) if (c) drawArc(c, a);
+    };
+    fit.current();
+    const ro = new ResizeObserver(() => fit.current());
+    ro.observe(stage);
+
+    let raf = 0, last = performance.now();
+    const loop = (now: number) => {
+      raf = requestAnimationFrame(loop);
+      const wall = (now - last) / 1000;
+      last = now;
+      if (offline.current) return;
+      const p = player.current;
+      const t = p?.time ?? 0;
+      try {
+        r.frame(t, wall, !!p?.playing, wall);
+      } catch (e) {
+        cancelAnimationFrame(raf);
+        setError((e as Error).message);
+        return;
+      }
+      const d = p?.duration ?? 0;
+      if (d > 0) {
+        const f = Math.min(1, t / d) * 100;
+        if (playedRef.current) playedRef.current.style.clipPath = `inset(0 ${100 - f}% 0 0)`;
+        if (headRef.current) headRef.current.style.left = `${f}%`;
+        if (nowRef.current) nowRef.current.textContent = clock(t);
+        if (sliderRef.current) sliderRef.current.setAttribute('aria-valuenow', String(Math.round(t)));
+      }
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      r.dispose();
+      renderer.current = null;
+    };
+  }, []);
+
+  useEffect(() => () => { player.current?.dispose(); player.current = null; }, []);
+
+  // ---- loading a song -----------------------------------------------------
+  const adoptBuffer = useCallback(async (audio: AudioBuffer, title: string) => {
+    setStatus('Measuring the sound');
+    setProgress(0);
+    const analysis = await analyzeAudio(audio, setProgress);
+    const s: Song = { title, analysis, audio };
+    songRef.current = s;
+    renderer.current?.setSong(analysis);
+    const p = getPlayer();
+    p.load(audio);
+    setSong(s);
+    setPhase('ready');
+    document.documentElement.style.setProperty('--song', toCss(oklch(0.84, 0.11, fifthsAngle(analysis.key.tonic) + HUE_OFFSET)));
+    void p.play();
+  }, [getPlayer]);
+
+  const fail = useCallback((message: string) => {
+    setError(message);
+    setPhase(songRef.current ? 'ready' : 'idle');
+  }, []);
+
+  const openFile = useCallback(async (file: File) => {
+    const p = getPlayer();
+    void p.ctx.resume();
+    p.pause();
+    setError('');
+    setPhase('loading');
+    setStatus('Reading the file');
+    setProgress(0);
+    let audio: AudioBuffer;
+    try {
+      audio = await p.decode(await file.arrayBuffer());
+    } catch {
+      fail(`"${file.name}" has no sound this browser can read. Try an MP3, WAV, FLAC, OGG or M4A file, or an MP4 or WebM video with a soundtrack.`);
+      return;
+    }
+    try {
+      await adoptBuffer(audio, file.name.replace(/\.[^.]+$/, ''));
+    } catch (e) {
+      fail(`The sound could not be measured: ${(e as Error).message}`);
+    }
+  }, [fail, getPlayer, adoptBuffer]);
+
+  const playDemo = useCallback(async () => {
+    const p = getPlayer();
+    void p.ctx.resume();
+    p.pause();
+    setError('');
+    setPhase('loading');
+    setStatus('Composing the demo');
+    setProgress(0);
+    try {
+      const { left, right } = await synthesizeDemo(44100);
+      const audio = p.ctx.createBuffer(2, left.length, 44100);
+      audio.getChannelData(0).set(left);
+      audio.getChannelData(1).set(right);
+      await adoptBuffer(audio, DEMO_TITLE);
+    } catch (e) {
+      fail(`The demo could not start: ${(e as Error).message}`);
+    }
+  }, [fail, getPlayer, adoptBuffer]);
+
+  useEffect(() => {
+    phaseRef.current = phase;
+    fit.current(); // the plate moves to make room for whatever is on screen
+  }, [song, phase]);
+
+  // ---- things the platform offers ------------------------------------------
+  useEffect(() => {
+    setCanFullscreen(!!document.fullscreenEnabled);
+    setShape(window.innerHeight > window.innerWidth ? 'portrait' : 'landscape');
+    if (window.matchMedia('(pointer: coarse)').matches) setFps(30);
+    // Installed app: files opened "with Nodal" arrive here.
+    const lq = (window as unknown as { launchQueue?: { setConsumer: (fn: (p: { files: FileSystemFileHandle[] }) => void) => void } }).launchQueue;
+    lq?.setConsumer(async (params) => {
+      const handle = params.files?.[0];
+      if (handle) void openFile(await handle.getFile());
+    });
+  }, [openFile]);
+
+  useEffect(() => {
+    // Keep the screen awake while a song plays.
+    let lock: WakeLockSentinel | null = null;
+    let cancelled = false;
+    if (playing && 'wakeLock' in navigator) {
+      navigator.wakeLock.request('screen').then((l) => { if (cancelled) void l.release(); else lock = l; }).catch(() => {});
+    }
+    return () => { cancelled = true; void lock?.release(); };
+  }, [playing]);
+
+  useEffect(() => {
+    if (!song || !('mediaSession' in navigator)) return;
+    navigator.mediaSession.metadata = new MediaMetadata({ title: song.title, artist: 'Nodal' });
+    navigator.mediaSession.setActionHandler('play', () => void player.current?.play());
+    navigator.mediaSession.setActionHandler('pause', () => player.current?.pause());
+  }, [song]);
+
+  const toggle = useCallback(() => {
+    const p = player.current;
+    if (!p?.buffer || offline.current) return;
+    if (p.playing) p.pause();
+    else void p.play();
+  }, []);
+
+  const seekTo = useCallback((t: number) => { void player.current?.seek(t); }, []);
+
+  // Controls step back while the song plays and nobody is touching anything.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const wake = () => {
+      setQuiet(false);
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (player.current?.playing && !document.querySelector('dialog[open]')) setQuiet(true);
+      }, 3500);
+    };
+    const key = (e: KeyboardEvent) => {
+      wake();
+      if (e.code === 'Space' && !(e.target as HTMLElement).closest('button, a, input, select, dialog, [role=slider]')) {
+        e.preventDefault();
+        toggle();
+      }
+    };
+    window.addEventListener('pointermove', wake);
+    window.addEventListener('pointerdown', wake);
+    window.addEventListener('keydown', key);
+    wake();
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('pointermove', wake);
+      window.removeEventListener('pointerdown', wake);
+      window.removeEventListener('keydown', key);
+    };
+  }, [toggle, playing]);
+
+  // ---- timeline -------------------------------------------------------------
+  const scrub = (e: React.PointerEvent<HTMLDivElement>, force = false) => {
+    const now = performance.now();
+    if (!force && now - lastSeek.current < 70) return;
+    lastSeek.current = now;
+    const box = e.currentTarget.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (e.clientX - box.left) / box.width));
+    seekTo(f * (player.current?.duration ?? 0));
+  };
+
+  // ---- export ---------------------------------------------------------------
+  const openExport = () => {
+    player.current?.pause();
+    setExp({ stage: 'options' });
+    setExpProgress(0);
+    exportDialog.current?.showModal();
+  };
+
+  const closeExport = () => {
+    abort.current?.abort();
+    setExp((prev) => {
+      if (prev?.stage === 'done' && prev.url) URL.revokeObjectURL(prev.url);
+      return null;
+    });
+    exportDialog.current?.close();
+  };
+
+  const download = (url: string, name: string) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const startExport = async () => {
+    const s = songRef.current, r = renderer.current, p = player.current, canvas = canvasRef.current;
+    if (!s || !r || !p || !canvas) return;
+    const long = even((size * 16) / 9);
+    const width = shape === 'landscape' ? long : size;
+    const height = shape === 'portrait' ? long : size;
+    const base = s.title.replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'nodal';
+    const controller = new AbortController();
+    abort.current = controller;
+    const finish = (blob: Blob | null, name: string) => {
+      const url = blob ? URL.createObjectURL(blob) : null;
+      if (url) download(url, name);
+      setExp({ stage: 'done', url, name });
+    };
+    const record = async () => {
+      setExp({ stage: 'running', live: true });
+      const blob = await exportRealtime({ canvas, player: p, fps, signal: controller.signal, onProgress: setExpProgress });
+      finish(blob, `${base} (Nodal).${blob.type.includes('mp4') ? 'mp4' : 'webm'}`);
+    };
+    try {
+      if (!offlineExportAvailable()) {
+        if (!realtimeExportAvailable()) throw new Error('This browser cannot make video files. Try a current version of Chrome, Edge, Safari or Firefox.');
+        await record();
+        return;
+      }
+      const name = `${base} (Nodal).mp4`;
+      let fileStream: FileSystemWritableFileStream | undefined;
+      type Picker = (o: { suggestedName?: string; types?: { description: string; accept: Record<string, string[]> }[] }) => Promise<FileSystemFileHandle>;
+      const picker = (window as unknown as { showSaveFilePicker?: Picker }).showSaveFilePicker;
+      if (picker) {
+        // Chrome and Edge: write the video straight to disk, so long songs do not fill memory.
+        try {
+          const handle = await picker.call(window, {
+            suggestedName: name,
+            types: [{ description: 'MP4 video', accept: { 'video/mp4': ['.mp4'] } }],
+          });
+          fileStream = await handle.createWritable();
+        } catch (e) {
+          if ((e as DOMException).name === 'AbortError') return; // picker closed, stay on the options
+        }
+      }
+      setExp({ stage: 'running', live: false });
+      offline.current = true;
+      canvas.classList.add('exporting');
+      try {
+        const blob = await exportOffline({
+          renderer: r, canvas, audio: s.audio, analysis: s.analysis,
+          width, height, fps, signal: controller.signal, onProgress: setExpProgress, fileStream,
+        });
+        finish(blob, name);
+      } catch (e) {
+        if (!(e instanceof ExportUnsupportedError)) throw e;
+        offline.current = false;
+        canvas.classList.remove('exporting');
+        fit.current();
+        if (!realtimeExportAvailable()) throw new Error('This device has no video encoder the browser can use.');
+        await record();
+      } finally {
+        offline.current = false;
+        canvas.classList.remove('exporting');
+        fit.current();
+      }
+    } catch (e) {
+      if ((e as DOMException).name === 'AbortError') setExp(null);
+      else setExp({ stage: 'error', message: (e as Error).message || 'The export stopped unexpectedly.' });
+    } finally {
+      abort.current = null;
+    }
+  };
+
+  const a = song?.analysis;
+  const ready = phase === 'ready' && song && a;
+
+  return (
+    <div
+      ref={stageRef}
+      className={`stage${quiet && ready ? ' quiet' : ''}${dragging ? ' dragging' : ''}`}
+      onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        const f = e.dataTransfer.files?.[0];
+        if (f) void openFile(f);
+      }}
+    >
+      <canvas ref={canvasRef} className="plate" aria-label="Waves of coloured light, shaped by the music" role="img" />
+      <input
+        ref={fileRef}
+        type="file"
+        accept="audio/*,video/*,.mp3,.wav,.flac,.ogg,.m4a,.aac,.opus,.mp4,.webm,.mov,.mkv"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = '';
+          if (f) void openFile(f);
+        }}
+      />
+
+      {phase === 'idle' && (
+        <main className="intro">
+          <h1>Nodal</h1>
+          <p>
+            Give it a song. Watch the sound itself move as waves of light, and keep it as a video.
+          </p>
+          <div className="actions">
+            <button className="solid" onClick={() => fileRef.current?.click()}>Open a song or video</button>
+            <button className="outline" onClick={() => void playDemo()}>Play the demo</button>
+          </div>
+          {error ? <p className="error" role="alert">{error}</p> : <p className="note">Your file stays on this device.</p>}
+        </main>
+      )}
+
+      {phase === 'loading' && (
+        <div className="loading" role="status">
+          <p>{status}</p>
+          <div className="meter"><div style={{ transform: `scaleX(${progress})` }} /></div>
+        </div>
+      )}
+
+      {ready && (
+        <>
+          <header className="top chrome">
+            <span className="mark">Nodal</span>
+            <nav className="tools">
+              <button onClick={openExport}>Export video</button>
+              <span className="designs" role="group" aria-label="Design">
+                <button aria-pressed={scene === 'ribbons'} onClick={() => chooseScene('ribbons')}>Ribbons</button>
+                <button aria-pressed={scene === 'rings'} onClick={() => chooseScene('rings')}>Rings</button>
+              </span>
+              <button onClick={() => fileRef.current?.click()}>Open a file</button>
+              <button onClick={() => aboutDialog.current?.showModal()}>How it works</button>
+              {canFullscreen && (
+                <button
+                  onClick={() => {
+                    if (document.fullscreenElement) void document.exitFullscreen();
+                    else void document.documentElement.requestFullscreen();
+                  }}
+                >
+                  Full screen
+                </button>
+              )}
+            </nav>
+          </header>
+
+          <footer className="bar chrome">
+            {error && <p className="error" role="alert">{error}</p>}
+            <div className="meta">
+              <h2>{song.title}</h2>
+              <dl>
+                <div><dt>Key</dt><dd>{a.key.name}</dd></div>
+                <div><dt>Tempo</dt><dd>{Math.round(a.bpm)} BPM</dd></div>
+                <div><dt>Figure</dt><dd>{a.fingerprint.slice(0, 4)} {a.fingerprint.slice(4, 8)}</dd></div>
+              </dl>
+            </div>
+            <div className="transport">
+              <button className="play" onClick={toggle} aria-label={playing ? 'Pause' : 'Play'}>
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  {playing ? <path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" /> : <path d="M8 5l11 7-11 7z" />}
+                </svg>
+              </button>
+              <span className="time" ref={nowRef}>0:00</span>
+              <div
+                ref={sliderRef}
+                className="arc"
+                role="slider"
+                tabIndex={0}
+                aria-label="Position in the song"
+                aria-valuemin={0}
+                aria-valuemax={Math.round(a.duration)}
+                aria-valuenow={0}
+                onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); scrub(e, true); }}
+                onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) scrub(e); }}
+                onPointerUp={(e) => scrub(e, true)}
+                onKeyDown={(e) => {
+                  const t = player.current?.time ?? 0;
+                  if (e.key === 'ArrowRight') seekTo(t + 5);
+                  else if (e.key === 'ArrowLeft') seekTo(t - 5);
+                  else if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); }
+                }}
+              >
+                <canvas ref={arcRef} className="arc-all" />
+                <div ref={playedRef} className="arc-played"><canvas ref={arcPlayedRef} /></div>
+                <div ref={headRef} className="arc-head" />
+              </div>
+              <span className="time">{clock(a.duration)}</span>
+            </div>
+          </footer>
+        </>
+      )}
+
+      {dragging && <div className="drop">Drop the song to play it</div>}
+
+      <dialog ref={exportDialog} onClose={() => { abort.current?.abort(); setExp(null); }}>
+        {exp?.stage === 'options' && (
+          <form method="dialog" onSubmit={(e) => { e.preventDefault(); void startExport(); }}>
+            <h3>Export video</h3>
+            <p>The whole song is drawn again from the start and saved as an MP4 video with its sound, exactly as long as the song. It uses the design you are watching.</p>
+            <label>Shape
+              <select value={shape} onChange={(e) => setShape(e.target.value as Shape)}>
+                <option value="landscape">Wide, 16:9</option>
+                <option value="portrait">Tall, 9:16</option>
+                <option value="square">Square</option>
+              </select>
+            </label>
+            <label>Sharpness
+              <select value={size} onChange={(e) => setSize(Number(e.target.value))}>
+                <option value={540}>540p, small file</option>
+                <option value={720}>720p</option>
+                <option value={1080}>1080p</option>
+                <option value={1440}>1440p</option>
+                <option value={2160}>4K</option>
+              </select>
+            </label>
+            <label>Smoothness
+              <select value={fps} onChange={(e) => setFps(Number(e.target.value))}>
+                <option value={30}>30 frames a second</option>
+                <option value={60}>60 frames a second</option>
+              </select>
+            </label>
+            <div className="actions">
+              <button type="submit" className="solid">Export video</button>
+              <button type="button" className="outline" onClick={closeExport}>Cancel</button>
+            </div>
+          </form>
+        )}
+        {exp?.stage === 'running' && (
+          <div role="status">
+            <h3>{exp.live ? 'Recording as the song plays' : 'Exporting video'}</h3>
+            <p>
+              {exp.live
+                ? 'This browser cannot encode video ahead of time, so the song is recorded once through. Keep this tab in front.'
+                : 'Keep this tab in front. Browsers slow down hidden tabs.'}
+            </p>
+            <div className="meter"><div style={{ transform: `scaleX(${expProgress})` }} /></div>
+            <p className="note">{Math.round(expProgress * 100)}%</p>
+            <div className="actions"><button className="outline" onClick={closeExport}>Cancel export</button></div>
+          </div>
+        )}
+        {exp?.stage === 'done' && (
+          <div>
+            <h3>Video exported</h3>
+            <p>{exp.url ? `"${exp.name}" is in your downloads.` : `Saved as "${exp.name}".`}</p>
+            <div className="actions">
+              {exp.url && <a className="solid" href={exp.url} download={exp.name}>Download again</a>}
+              <button className="outline" onClick={closeExport}>Close</button>
+            </div>
+          </div>
+        )}
+        {exp?.stage === 'error' && (
+          <div>
+            <h3>The video was not exported</h3>
+            <p role="alert">{exp.message}</p>
+            <div className="actions">
+              <button className="solid" onClick={() => setExp({ stage: 'options' })}>Change settings</button>
+              <button className="outline" onClick={closeExport}>Close</button>
+            </div>
+          </div>
+        )}
+      </dialog>
+
+      <dialog ref={aboutDialog} className="about">
+        <h3>How it works</h3>
+        <h4>Ribbons</h4>
+        <p>
+          The middle of the screen is now. The sound then travels out to both sides, and the edges are four seconds
+          ago. Each ribbon is one part of the sound, with bass at the bottom and the highest sounds at the top.
+        </p>
+        <p>
+          A ribbon rises where its part of the sound was loud and lies flat where it was silent. Bass makes long,
+          slow waves and high sounds make short, quick ones. The waves travel faster when the music is loud.
+        </p>
+        <h4>Rings</h4>
+        <p>
+          A ring leaves the centre twice every beat and travels outward. Each ring keeps the moment it left:
+          brighter if the music was loud, bolder if there was a hit like a drum, and coloured by the notes.
+        </p>
+        <p>
+          The twelve notes sit around the circle like hours on a clock. A ring bulges toward the notes that were
+          sounding, so a chord gives a ring its shape.
+        </p>
+        <h4>Colour</h4>
+        <p>The key of the song picks the colours, so every song has its own palette.</p>
+        <div className="actions"><button className="outline" onClick={() => aboutDialog.current?.close()}>Close</button></div>
+      </dialog>
+    </div>
+  );
+}
