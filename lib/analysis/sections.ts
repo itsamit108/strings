@@ -16,12 +16,13 @@
  *  - Ribbons: energy across the whole spectrum at once.
  *  - Faraday waves: steady chords (several notes held together), as the standing waves on a vibrated liquid.
  *  - Strings: clear notes with attacks (plucked or struck), as the strings that sound them.
+ *  - Tonnetz: the harmony moving (chords changing), as a path across the lattice of fifths and thirds.
  */
 import type { Analysis } from './types';
 import { BAND_COUNT } from './types';
 
-export type Design = 'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'faraday' | 'strings';
-export const DESIGNS: Design[] = ['ribbons', 'rings', 'plate', 'ripples', 'membrane', 'faraday', 'strings'];
+export type Design = 'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'faraday' | 'strings' | 'tonnetz';
+export const DESIGNS: Design[] = ['ribbons', 'rings', 'plate', 'ripples', 'membrane', 'faraday', 'strings', 'tonnetz'];
 export const DESIGN_NAMES: Record<Design, string> = {
   ribbons: 'Ribbons',
   rings: 'Rings',
@@ -30,6 +31,7 @@ export const DESIGN_NAMES: Record<Design, string> = {
   membrane: 'Membrane',
   faraday: 'Faraday waves',
   strings: 'Strings',
+  tonnetz: 'Harmony map',
 };
 
 export interface Section {
@@ -224,6 +226,7 @@ function raw(s: SectionStats): Record<Design, number> {
     ribbons: s.spread * (0.5 + s.loud) * (0.7 + s.high),
     faraday: s.steady * s.pair * (0.5 + s.spread) * calm,
     strings: s.top1 * Math.min(1, 0.2 + s.onset / 0.25) * (0.6 + s.high),
+    tonnetz: (1.15 - s.steady) * s.pair * (0.5 + s.mid),
   };
 }
 

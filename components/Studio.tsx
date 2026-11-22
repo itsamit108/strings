@@ -140,7 +140,7 @@ export default function Studio() {
     renderer.current = r;
     const s = songRef.current;
     if (s) r.setSong(s.analysis);
-    // For checking one design on its own: ?design=plate (ribbons, rings, plate, ripples, membrane, faraday, strings).
+    // For checking one design on its own: ?design=plate (ribbons, rings, plate, ripples, membrane, faraday, strings, tonnetz).
     // Honour the system's "reduce motion" setting on screen (exported videos always have full motion).
     const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
     r.reducedMotion = calm.matches;
@@ -847,6 +847,20 @@ export default function Studio() {
           One string for each note sounding, lowest on the left, each as long as a string tuned to that note would
           be. A plucked string vibrates as a sum of harmonics set by where it is plucked: near the end for a bright
           sound, near the middle for a mellow one. That point comes from this sound&apos;s brightness.
+        </p>
+        <h4>Harmony map</h4>
+        <p>
+          The notes on Euler&apos;s Tonnetz: each step right is a fifth, up-right a major third, up-left a minor
+          third, so every major or minor chord is a small triangle. Notes light up as they sound, the chord draws
+          its triangle, and the view travels with the harmony, leaving the path the song&apos;s chords have taken.
+        </p>
+        <h4>Texture</h4>
+        <p>
+          Listeners match a sound&apos;s texture to a picture&apos;s (Giannakis 2006). Dissonance is measured with the
+          Plomp–Levelt roughness curve; the rougher the sound, the more the picture shimmers and loses its
+          regularity. A wide, noisy spectrum gives grainy light; a sharp sound stays crisp and a dull one glows.
+          In the sky, particles gather in bands at the still points of the bass&apos;s standing wave, as dust does in
+          Kundt&apos;s tube.
         </p>
         <h4>Where and how large</h4>
         <p>

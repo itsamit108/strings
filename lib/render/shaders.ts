@@ -153,6 +153,12 @@ uniform float uTonal;       // how clearly pitched the sound is (0 noise .. 1 pu
 uniform float uSharp;       // timbre sharpness: 0 soft and mellow .. 1 bright and percussive
 uniform float uMoteSize;    // particle size: low register → large, high → small (pitch–size correspondence)
 uniform float uMoteDensity; // share of cells holding a mote
+uniform vec2 uKundtDir;     // direction of the bass standing wave across the sky
+uniform float uKundtK;      // its wavenumber, radians per pixel
+uniform float uKundt;       // how strongly particles gather at its still points (0..0.85), from the bass
+uniform float uRough;       // sensory roughness (Plomp–Levelt): breaks the picture's regularity, makes it shimmer
+uniform float uGrain;       // spectral spread: noisy, wide spectra give a grainy light
+uniform float uSoft;        // 1 - sharpness: dull sound glows softly, sharp sound is crisp
 // caption (title and artist)
 uniform sampler2D uCaption;
 uniform float uCaptionAlpha;
@@ -279,6 +285,10 @@ vec3 sky(vec2 px) {
   // Two depths of stars turning at different rates (near ones faster), so the sky has depth.
   // Particles drift with the music (faster when louder; near ones faster than far ones) and are pushed by hits.
   vec2 p = px - hitPush(px);
+  // Kundt's dust: in a standing sound wave, dust gathers where the air does not move. The sky's particles
+  // bunch into bands at the bass wave's still points, a half-wavelength apart, more tightly with more bass.
+  float ks = dot(p, uKundtDir);
+  p += uKundtDir * (-uKundt * sin(2.0 * uKundtK * ks) / (2.0 * uKundtK));
   vec2 flow = vec2(uFlow.x, uFlow.y) * uUnit;
   vec3 s = stars(turn(p, uRot) - flow * 1.6, uUnit / 14.0, uStarDensity, 0.9, band)
          + stars(turn(p, uRot * 0.55) - flow * 0.7 + 911.0, uUnit / 34.0, uStarDensity * 0.8, 0.45, band);
@@ -288,14 +298,22 @@ vec3 sky(vec2 px) {
 }
 void main() {
   vec2 uv = gl_FragCoord.xy * uInvRes;
-  vec3 light = texelFetch(uAccum, ivec2(gl_FragCoord.xy), 0).rgb;
+  // Roughness: two close frequencies beat, and a rough sound's picture loses its regularity (periodicity ↔
+  // dissonance, Giannakis 2006): the light is displaced by a slowly moving, irregular field.
+  vec2 wq = gl_FragCoord.xy / (0.06 * uUnit);
+  vec2 warp = (vec2(vnoise(wq + uTime * 0.9), vnoise(wq * 1.3 - uTime * 0.8 + 41.0)) - 0.5) * 2.0 * uRough * 0.012 * uUnit;
+  vec3 light = textureLod(uAccum, (gl_FragCoord.xy + warp) * uInvRes, 0.0).rgb;
+  // Grain: a wide, noisy spectrum gives a granular light (coarseness ↔ spectral compactness).
+  float gr = hash12(floor(gl_FragCoord.xy / max(1.0, uUnit / 600.0)) + uSeed);
+  light *= mix(1.0, 0.25 + 1.5 * gr, uGrain);
   // Glow: the same light, blurred. Each layer is read at four nearby points so it stays smooth.
   vec2 r1 = uInvRes * 2.5, r2 = uInvRes * 7.0;
   vec3 near = textureLod(uAccum, uv + r1 * vec2(1.0, 0.4), 1.5).rgb + textureLod(uAccum, uv + r1 * vec2(-0.4, 1.0), 1.5).rgb
             + textureLod(uAccum, uv + r1 * vec2(-1.0, -0.4), 1.5).rgb + textureLod(uAccum, uv + r1 * vec2(0.4, -1.0), 1.5).rgb;
   vec3 wide = textureLod(uAccum, uv + r2 * vec2(1.0, 0.4), 3.0).rgb + textureLod(uAccum, uv + r2 * vec2(-0.4, 1.0), 3.0).rgb
             + textureLod(uAccum, uv + r2 * vec2(-1.0, -0.4), 3.0).rgb + textureLod(uAccum, uv + r2 * vec2(0.4, -1.0), 3.0).rgb;
-  vec3 bloom = 0.2 * near + 0.1 * wide;
+  // Contrast ↔ sharpness: a dull sound glows softly; a sharp one stays crisp.
+  vec3 bloom = (0.2 * near + 0.1 * wide) * (0.55 + 1.0 * uSoft);
   vec3 total = (light + 0.45 * bloom) * uExposure;
   // Tone map on brightness only, so strong light stays coloured instead of washing to white.
   float m = max(total.r, max(total.g, total.b));
@@ -581,4 +599,73 @@ void main() {
     acc += uCol[i] * (line + 0.6 * ends);
   }
   o = vec4(acc * uIntensity * reveal(), 1.0);
+}`;
+
+
+/**
+ * TONNETZ (Euler 1739; Riemann; Chew's spiral array): the twelve notes on a lattice where each step right is
+ * a fifth, each step up-right a major third and up-left a minor third. A major or minor chord is a small
+ * triangle; neighbouring chords share an edge. Notes light up as they sound, the edges between notes
+ * sounding together draw the chord, and the view follows the harmony's centre of effect, so each song
+ * draws the path of its own harmonic journey.
+ */
+export const TONNETZ_FS = /* glsl */ `#version 300 es
+precision highp float;
+uniform vec2 uCenterPx;
+uniform float uRadius;
+uniform float uSpacing;       // pixels between neighbouring notes
+uniform vec2 uCam;            // the view's centre, lattice plane (cartesian, in steps)
+uniform float uW[12];         // how strongly each note sounds now
+uniform vec3 uCol[12];
+uniform vec2 uTrail[48];      // the harmony's recent path (cartesian, in steps), newest first
+uniform int uTrailN;
+uniform float uWidthPx;
+uniform float uIntensity;
+out vec4 o;
+${REVEAL}
+const vec2 E1 = vec2(1.0, 0.0);            // a fifth
+const vec2 E2 = vec2(0.5, 0.8660254);      // a major third
+int pcOf(vec2 ab) { return int(mod(7.0 * ab.x + 4.0 * ab.y, 12.0)); }
+vec2 cart(vec2 ab) { return ab.x * E1 + ab.y * E2; }
+float seg(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a, ba = b - a;
+  float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+  return length(pa - ba * h);
+}
+void main() {
+  vec2 px = gl_FragCoord.xy - uCenterPx;
+  float r = length(px) / uRadius;
+  if (r > 1.0) { o = vec4(0.0); return; }
+  vec2 q = px / uSpacing + uCam;
+  float b0 = floor(q.y / 0.8660254), a0 = floor(q.x - 0.5 * b0 - 0.5);
+  vec3 acc = vec3(0.0);
+  float wpx = uWidthPx / uSpacing;
+  for (int db = -1; db <= 2; db++) for (int da = -1; da <= 2; da++) {
+    vec2 ab = vec2(a0 + float(da), b0 + float(db));
+    vec2 c = cart(ab);
+    int pc = pcOf(ab);
+    float w = uW[pc];
+    float d = length(q - c);
+    // the note: a faint point always, a bright disc while it sounds
+    float rad = 0.035 + 0.13 * w;
+    acc += uCol[pc] * (0.10 * exp(-d * d / (0.0016)) + w * exp(-d * d / (rad * rad)) * 0.9);
+    // edges to the next notes along the three axes, lit when both notes sound
+    vec2 nb[3] = vec2[3](E1, E2, E2 - E1);
+    for (int k = 0; k < 3; k++) {
+      vec2 ab2 = ab + (k == 0 ? vec2(1.0, 0.0) : k == 1 ? vec2(0.0, 1.0) : vec2(-1.0, 1.0));
+      int pc2 = pcOf(ab2);
+      float ew = min(w, uW[pc2]);
+      float ds = seg(q, c, c + nb[k]);
+      acc += mix(uCol[pc], uCol[pc2], 0.5) * (0.03 * exp(-ds * ds / (wpx * wpx * 0.5)) + 1.2 * ew * exp(-ds * ds / (wpx * wpx * 2.0)));
+    }
+  }
+  // the path the harmony has taken
+  for (int i = 0; i + 1 < 48; i++) {
+    if (i + 1 >= uTrailN) break;
+    float ds = seg(q, uTrail[i], uTrail[i + 1]);
+    float age = float(i) / 48.0;
+    acc += vec3(0.9, 0.88, 0.82) * 0.5 * (1.0 - age) * exp(-ds * ds / (wpx * wpx * 1.5));
+  }
+  float edge = 1.0 - smoothstep(0.7, 1.0, r);
+  o = vec4(acc * edge * uIntensity * reveal(), 1.0);
 }`;

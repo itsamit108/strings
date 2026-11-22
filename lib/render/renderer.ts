@@ -105,7 +105,7 @@ function hash01(n: number): number {
 
 export class PlateRenderer {
   private gl!: WebGL2RenderingContext;
-  private prog!: Record<'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'faraday' | 'strings' | 'fade' | 'present', Program>;
+  private prog!: Record<'ribbons' | 'rings' | 'plate' | 'ripples' | 'membrane' | 'faraday' | 'strings' | 'tonnetz' | 'fade' | 'present', Program>;
   private besselTex!: WebGLTexture;
   private captionTex!: WebGLTexture;
   private labelTex!: WebGLTexture;
@@ -230,6 +230,14 @@ export class PlateRenderer {
   private placeY = 0;
   private placeS = 1;
   private faradayPhase = 0;
+  /** Tonnetz view (lattice plane, cartesian steps) and the harmony's recent path */
+  private tzCam = [0, 0];
+  private tzTrail: number[] = [];
+  private tzLast = 0;
+  /** texture of the light: roughness, grain, softness (eased) */
+  private rough = 0;
+  private grain = 0;
+  private soft = 0.5;
   private stringPhase = new Float32Array(6);
   /** when each ring leaves the centre and how strong it is: (seconds, strength) pairs, in time order */
   private ringEvents: Float32Array | null = null;
@@ -299,7 +307,7 @@ export class PlateRenderer {
     };
     this.prog = {
       ribbons: mk(S.RIBBONS_FS), rings: mk(S.RINGS_FS), plate: mk(S.PLATE_FS), ripples: mk(S.RIPPLES_FS),
-      membrane: mk(S.MEMBRANE_FS), faraday: mk(S.FARADAY_FS), strings: mk(S.STRINGS_FS), fade: mk(S.FADE_FS), present: mk(S.PRESENT_FS),
+      membrane: mk(S.MEMBRANE_FS), faraday: mk(S.FARADAY_FS), strings: mk(S.STRINGS_FS), tonnetz: mk(S.TONNETZ_FS), fade: mk(S.FADE_FS), present: mk(S.PRESENT_FS),
     };
     this.vao = gl.createVertexArray()!;
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -362,6 +370,12 @@ export class PlateRenderer {
     this.rotVel = Number.NaN;
     this.placeX = Number.NaN;
     this.faradayPhase = 0;
+    this.tzCam = [0, 0];
+    this.tzTrail = [];
+    this.tzLast = 0;
+    this.rough = 0;
+    this.grain = 0;
+    this.soft = 0.5;
     this.stringPhase.fill(0);
     this.register = 300;
     this.tonal = 0.5;
@@ -727,7 +741,7 @@ export class PlateRenderer {
 
     // ---- light buffer -----------------------------------------------------
     // During a change of design the light lingers longer, like a reverb tail, so one dissolves into the next.
-    const fade = Math.exp(-dt / (this.trail + 0.28 * this.blend));
+    const fade = Math.exp(-dt / (this.trail + 0.12 * this.blend));
     const level = (1 - fade) * (0.5 + 0.5 * this.live) * (0.8 + 0.45 * this.energy + 0.5 * this.kick);
     gl.bindVertexArray(this.vao);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.accum.fbo);
@@ -934,6 +948,48 @@ export class PlateRenderer {
       gl.uniform1f(pr.u.uSharp, this.timbreSharp);
       // Register 60 Hz → size 9, 2 kHz → size 3 (∝ 1/√f).
       gl.uniform1f(pr.u.uMoteSize, Math.min(10, Math.max(2.5, 9 * Math.sqrt(60 / Math.max(60, register)) * (1 + 0.25 * this.bassNow))));
+      // ---- texture of the light, from timbre (Giannakis 2006) ----
+      // Roughness: Plomp–Levelt curve (Sethares' parametrisation) over the notes sounding and their first
+      // three harmonics, in the register they sound in; 0 for consonance, toward 1 for clusters.
+      const top6 = ordered.length ? Array.from({ length: 12 }, (_, pc) => pc).sort((x, y) => this.chroma[y] - this.chroma[x]).slice(0, 6) : [];
+      const parts: [number, number][] = [];
+      for (const pc of top6) {
+        const f0 = 261.6256 * Math.pow(2, pc / 12) * Math.pow(2, Math.round(Math.log2(register / 261.6256)));
+        const amp = Math.max(0, this.chroma[pc]);
+        for (let h = 1; h <= 3; h++) parts.push([f0 * h, amp / h]);
+      }
+      let dis = 0, norm = 0;
+      for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
+        const [f1, a1] = parts[i], [f2, a2] = parts[j];
+        const s = 0.24 / (0.0207 * Math.min(f1, f2) + 18.96), x = s * Math.abs(f2 - f1);
+        const m = Math.min(a1, a2);
+        dis += m * (Math.exp(-3.5 * x) - Math.exp(-5.75 * x));
+        norm += m;
+      }
+      const roughT = a && norm > 1e-6 ? Math.min(1, (dis / norm) * 4.5) * Math.min(1, this.energy * 1.5) : 0;
+      // Spectral spread: how widely energy spreads over the pitch ranges (std of band index, normalised).
+      let bw = 0, bm = 0;
+      for (let k = 0; k < BAND_COUNT; k++) { bw += this.bandsNow[k]; bm += this.bandsNow[k] * k; }
+      bm = bw > 1e-6 ? bm / bw : 3.5;
+      let bv = 0;
+      for (let k = 0; k < BAND_COUNT; k++) bv += this.bandsNow[k] * (k - bm) * (k - bm);
+      const spreadN = bw > 1e-6 ? Math.sqrt(bv / bw) / 3 : 0.5;
+      const grainT = a ? Math.max(0, Math.min(1, (spreadN - 0.55) * 1.6 + 0.6 * (1 - now.clarity) - 0.25)) * 0.55 : 0;
+      this.rough += (roughT - this.rough) * ease(0.6);
+      this.grain += (grainT - this.grain) * ease(1);
+      this.soft += (1 - this.timbreSharp - this.soft) * ease(1);
+      const calmFx = this.reducedMotion ? 0.3 : 1;
+      gl.uniform1f(pr.u.uRough, this.rough * calmFx);
+      gl.uniform1f(pr.u.uGrain, this.grain);
+      gl.uniform1f(pr.u.uSoft, this.soft);
+      // ---- Kundt's dust: the bass's standing wave across the sky ----
+      // Wavelength ∝ 1 / frequency of where the bass sits (pitch ranges 0–1), drawn so 40 Hz spans 0.5 of the picture.
+      const bassHz = BAND_LOW_HZ * Math.pow(BAND_HIGH_HZ / BAND_LOW_HZ, ((this.bandsNow[1] > this.bandsNow[0] ? 1 : 0) + 0.5) / BAND_COUNT);
+      const lam = unit * 0.5 * (40 / bassHz) * 1.6;
+      const kAng = this.membraneTurn[2];
+      gl.uniform2f(pr.u.uKundtDir, Math.cos(kAng), Math.sin(kAng));
+      gl.uniform1f(pr.u.uKundtK, (2 * Math.PI) / lam);
+      gl.uniform1f(pr.u.uKundt, a ? Math.min(0.85, 1.1 * this.bassE) * calmFx : 0);
       gl.uniform1f(pr.u.uMoteDensity, a ? Math.min(0.4, 0.08 + 0.25 * this.energy + 0.15 * this.voiceNow + 1.2 * this.songBusy) : 0.12);
     }
     gl.uniform1f(pr.u.uWaveSpeed, (0.5 * Math.hypot(W, H)) / (4 * (a?.beatPeriod ?? 0.6)));
@@ -1155,6 +1211,50 @@ export class PlateRenderer {
       gl.uniform1f(p.u.uCy, c.cy);
       gl.uniform1f(p.u.uWidthPx, (unit / 900) * 1.4 * c.voiceWide);
       gl.uniform1f(p.u.uIntensity, lvl * 1.3);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    } else if (design === 'tonnetz') {
+      // The view follows the harmony's centre of effect: each note sounding, at its place on the lattice
+      // nearest the current view, weighted by how strongly it sounds (Chew's spiral array, unrolled).
+      const W12 = new Float32Array(12), cols = new Float32Array(36);
+      const topW = Math.max(1e-6, this.plateW[c.order[0]]);
+      for (let pc = 0; pc < 12; pc++) { W12[pc] = Math.min(1, this.plateW[pc] / topW) ** 1.5; cols.set(note(pc, 0.74), pc * 3); }
+      const cam = this.tzCam;
+      let sx = 0, sy = 0, sw = 0;
+      for (let pc = 0; pc < 12; pc++) {
+        const w = W12[pc] ** 2;
+        if (w < 0.01) continue;
+        // nearest lattice point (a, b) with 7a + 4b ≡ pc (mod 12) to the camera
+        let best = 1e9, bx = 0, by = 0;
+        const b0 = Math.round(cam[1] / 0.8660254), a0 = Math.round(cam[0] - 0.5 * b0);
+        for (let db = -4; db <= 4; db++) for (let da = -4; da <= 4; da++) {
+          const A = a0 + da, B = b0 + db;
+          if ((((7 * A + 4 * B) % 12) + 12) % 12 !== pc) continue;
+          const x = A + 0.5 * B, y = 0.8660254 * B, d = (x - cam[0]) ** 2 + (y - cam[1]) ** 2;
+          if (d < best) { best = d; bx = x; by = y; }
+        }
+        sx += w * bx; sy += w * by; sw += w;
+      }
+      if (sw > 0) { cam[0] += (sx / sw - cam[0]) * ease(3.5); cam[1] += (sy / sw - cam[1]) * ease(3.5); }
+      if (c.time - this.tzLast > 0.15 || c.time < this.tzLast) {
+        this.tzLast = c.time;
+        this.tzTrail.unshift(cam[0], cam[1]);
+        if (this.tzTrail.length > 96) this.tzTrail.length = 96;
+      }
+      const trail = new Float32Array(96);
+      trail.set(this.tzTrail);
+      const p = this.prog.tonnetz;
+      this.use(p);
+      gl.uniform2f(p.u.uCenterPx, c.cx, c.cy);
+      gl.uniform1f(p.u.uRadius, 0.47 * unit * c.pulse);
+      // Spacing from the register: low music, a closer (larger) lattice; high music, a wider view.
+      gl.uniform1f(p.u.uSpacing, unit * c.pulse * Math.min(0.2, Math.max(0.11, 0.15 * Math.sqrt(330 / this.register))));
+      gl.uniform2f(p.u.uCam, cam[0], cam[1]);
+      gl.uniform1fv(p.u.uW, W12);
+      gl.uniform3fv(p.u.uCol, cols);
+      gl.uniform2fv(p.u.uTrail, trail);
+      gl.uniform1i(p.u.uTrailN, this.tzTrail.length / 2);
+      gl.uniform1f(p.u.uWidthPx, 1.6 * c.voiceWide);
+      gl.uniform1f(p.u.uIntensity, lvl * 1.4);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     } else if (design === 'ripples') {
       // One source for each note clearly sounding (at least a quarter as strong as the strongest), 2 to 4.
